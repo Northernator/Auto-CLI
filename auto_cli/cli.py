@@ -86,10 +86,11 @@ def build_scenario(url: str, browser: str, wait_ms: int) -> dict:
 
 
 def _looks_like_js_app(target: Path) -> bool:
+    if target.is_file():
+        return target.suffix.lower() in {".asar", ".js", ".mjs", ".cjs"}
     if target.suffix.lower() == ".asar":
         return True
-    js = list(target.rglob("*.js"))[:50]
-    return len(js) >= 1
+    return next(target.rglob("*.js"), None) is not None
 
 
 def _target_probes(target: Path, only: list[str] | None) -> list[tuple[str, list[str]]]:
@@ -101,7 +102,11 @@ def _target_probes(target: Path, only: list[str] | None) -> list[tuple[str, list
     if (not only or "analyze-javascript-application" in only) and _looks_like_js_app(target):
         probes.append(("analyze-javascript-application", [str(target)]))
     if not only or "inspect-sqlite-database" in only:
-        for db in sorted(target.rglob("*.db")) + sorted(target.rglob("*.sqlite")):
+        databases = (
+            [target] if target.is_file() and target.suffix.lower() in {".db", ".sqlite", ".sqlite3"}
+            else sorted(p for p in target.rglob("*") if p.suffix.lower() in {".db", ".sqlite", ".sqlite3"})
+        )
+        for db in databases:
             probes.append(("inspect-sqlite-database", [str(db), "--schema-scope", "database"]))
             break
     for cmd in only or []:
@@ -483,6 +488,7 @@ def cmd_auto(args) -> int:
         print("      " + line)
 
     # 3b. GUI leg: drive the UIA surface and add the ui command group
+    gui_failed = False
     if args.gui_process or args.gui_pid or args.gui_title:
         print("[4b/5] GUI leg: driving UIA...", flush=True)
         try:
@@ -503,8 +509,10 @@ def cmd_auto(args) -> int:
                     print("      scaffold upgraded: ui command group added")
             else:
                 print("      GUI window not found", file=sys.stderr)
+                gui_failed = True
         except gui_mod.GuiError as e:
             print(f"      GUI leg skipped: {e}", file=sys.stderr)
+            gui_failed = True
 
     # 4. validate (one repair pass if tests fail)
     print("[5/5] validate...", flush=True)
@@ -517,9 +525,10 @@ def cmd_auto(args) -> int:
         report = vmod.validate(root)
         for line in report.lines():
             print("      " + line)
-    print(f"result: {'OK' if report.ok else 'FAILED'}")
+    ok = report.ok and not gui_failed
+    print(f"result: {'OK' if ok else 'FAILED'}")
     print(f"harness: {root}")
-    return 0 if report.ok else 2
+    return 0 if ok else 2
 
 
 def cmd_gui(args) -> int:
@@ -530,7 +539,7 @@ def cmd_gui(args) -> int:
     driver when the provider is unavailable. --backend rea|local forces one.
     """
     backend = getattr(args, "backend", "auto") or "auto"
-    rea = rea_client.find_rea()
+    rea = rea_client.find_rea() if backend != "local" else None
     use_rea = False
     window_id = args.window_id
     pid = args.pid or 0
@@ -571,6 +580,8 @@ def cmd_gui(args) -> int:
 
 def _gui_find_window(args):
     try:
+        if args.window_id is not None:
+            return gui_mod.find_window_by_handle(args.window_id)
         return gui_mod.find_window(
             pid=args.pid, process=args.process, title_contains=args.title
         )
@@ -581,8 +592,10 @@ def _gui_find_window(args):
 
 def _cmd_gui_local(args) -> int:
     try:
-        window = gui_mod.find_window(
-            pid=args.pid, process=args.process, title_contains=args.title
+        window = (
+            gui_mod.find_window_by_handle(args.window_id)
+            if args.window_id is not None else
+            gui_mod.find_window(pid=args.pid, process=args.process, title_contains=args.title)
         )
     except gui_mod.GuiError as e:
         print(str(e), file=sys.stderr)
@@ -632,7 +645,7 @@ def _cmd_gui_local(args) -> int:
     print(f"report: {out}")
     if args.dir and gui_mod.upgrade_scaffold(Path(args.dir), report):
         print("scaffold upgraded: ui command group added")
-    return 0
+    return 0 if all(action.ok for action in report.actions) else 2
 
 
 def _cmd_gui_via_rea(args, rea, window_id: int, pid: int) -> int:
@@ -640,6 +653,9 @@ def _cmd_gui_via_rea(args, rea, window_id: int, pid: int) -> int:
     try:
         nodes = gui_mod.capture_via_rea(rea, window_id, pid, max_nodes=args.depth * 80)
     except gui_mod.GuiError as e:
+        if args.backend == "rea":
+            print(f"[gui] REA capture failed: {e}", file=sys.stderr)
+            return 1
         print(
             f"[gui] REA capture failed ({e}) - falling back to the built-in driver",
             file=sys.stderr,
@@ -693,7 +709,7 @@ def _cmd_gui_via_rea(args, rea, window_id: int, pid: int) -> int:
     print(f"report: {out}")
     if args.dir and gui_mod.upgrade_scaffold(Path(args.dir), report):
         print("scaffold upgraded: ui command group added")
-    return 0
+    return 0 if all(action.ok for action in report.actions) else 2
 
 
 def cmd_validate(args) -> int:

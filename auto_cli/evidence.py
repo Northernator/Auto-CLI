@@ -265,11 +265,11 @@ def local_filesystem_probe(target: str | Path) -> list[Finding]:
     findings: list[Finding] = []
     if not root.exists():
         return findings
-    for p in sorted(root.rglob("*")):
+    for p in ([root] if root.is_file() else sorted(root.rglob("*"))):
         if not p.is_file():
             continue
         name = p.name.lower()
-        rel = str(p.relative_to(root))
+        rel = str(p.resolve()) if root.is_file() else str(p.relative_to(root))
         if name.endswith((".sqlite", ".sqlite3", ".db")):
             findings.append(Finding(kind="database", value=rel, source_command="local-fs", confidence="file-present"))
         elif name.endswith(".asar"):

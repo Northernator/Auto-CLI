@@ -67,9 +67,11 @@ def find_rea() -> ReaLocation | None:
 
 def version(loc: ReaLocation, timeout: int = 120) -> str:
     proc = subprocess.run(
-        loc.argv + ["--version"], capture_output=True, text=True, timeout=timeout
+        loc.argv + ["--version"], capture_output=True, text=True,
+        encoding="utf-8", errors="replace", timeout=timeout,
     )
-    return (proc.stdout or proc.stderr).strip()
+    proc.check_returncode()
+    return proc.stdout.strip()
 
 
 @dataclass
@@ -104,7 +106,9 @@ def run_probe(
     argv = loc.argv + [command] + list(args) + ["--format", "json"]
     start = time.monotonic()
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout
+        )
     except subprocess.TimeoutExpired:
         return ProbeResult(
             command=command,

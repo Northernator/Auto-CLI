@@ -79,6 +79,19 @@ def test_verify_database(tmp_path):
     assert "TARGET_ROOT" in report.patches
 
 
+def test_verify_database_file_with_uri_characters(tmp_path):
+    db = tmp_path / "library#1.db"
+    with sqlite3.connect(db) as con:
+        con.execute("CREATE TABLE books(id INTEGER PRIMARY KEY)")
+    bundle = ev.EvidenceBundle(target=str(db), findings=ev.local_filesystem_probe(db))
+    plan = surface.classify(bundle)
+    root = scaffold.generate(plan, bundle, tmp_path / "out", name="library")
+    report = vfy.verify(bundle, plan, root)
+    assert report.checks[0].state == "verified"
+    assert "books" in report.checks[0].detail
+    assert report.patches["TARGET_ROOT"] == str(tmp_path.resolve())
+
+
 def test_verify_patches_backend_endpoints(tmp_path, live_server):
     bundle, plan, root = _bundle_and_scaffold(tmp_path, live_server)
     vfy.verify(bundle, plan, root)

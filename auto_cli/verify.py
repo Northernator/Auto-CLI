@@ -194,7 +194,7 @@ def verify(
             )
         else:
             try:
-                con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+                con = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)
                 tables = [
                     r[0]
                     for r in con.execute(
@@ -205,7 +205,8 @@ def verify(
                 baked = re.findall(r'DEFAULT_DB = "([^"]*)"', backend_src)
                 if baked and baked[0] != rel:
                     report.patches["DEFAULT_DB"] = rel
-                report.patches["TARGET_ROOT"] = str(Path(plan.target).resolve())
+                target_root = Path(plan.target).resolve()
+                report.patches["TARGET_ROOT"] = str(target_root.parent if target_root.is_file() else target_root)
                 report.checks.append(
                     Verification(
                         kind="database",
