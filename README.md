@@ -2,6 +2,8 @@
 
 **Point it at software. Get an agent-native CLI.**
 
+![auto-cli pipeline: from app to harness](docs/pipeline.jpg)
+
 [REA](https://github.com/morluto/rea) (`npm i -g rea-agents`) reverse-engineers
 software for agents. [CLI-Anything](https://github.com/HKUDS/CLI-Anything) is a
 registry of hand-written CLI harnesses that make software agent-native. The
@@ -34,19 +36,63 @@ target app ──► REA probes ──► findings ──► surface classifier 
 Everything is deterministic and offline-capable except the probes themselves;
 REA failures are recorded as limitations, never crashes.
 
-## Install
+## Getting started
+
+Three pieces, one chain. Steps 1-2 give you the static pipeline; step 3 is a
+real run; step 4 adds the Windows GUI leg.
+
+**1. REA — the recon engine** (Node 22.19+/24.11+)
 
 ```bash
-# from this directory
-pip install -e .
-
-# REA is an external dependency (Node 22.19+/24.11+):
 npm install -g rea-agents
-auto-cli doctor
 ```
 
-Zero runtime dependencies for auto-cli itself (stdlib only). REA is
-located via `rea` on PATH, `$REA_BIN`, or an `npx` fallback.
+**2. Auto-CLI — the pipeline** (Python 3.10+, stdlib only)
+
+```bash
+pip install git+https://github.com/Northernator/Auto-CLI.git
+auto-cli doctor          # REA ok: 6.7.0
+```
+
+**3. One pipeline run** — any SQLite database works as a target:
+
+```bash
+# a target you can create in one line
+python -c "import sqlite3; c=sqlite3.connect('library.db'); \
+c.executescript('CREATE TABLE books(id INTEGER PRIMARY KEY, title TEXT, author TEXT); \
+INSERT INTO books(title,author) VALUES (\'Dune\',\'Herbert\');'); c.commit()"
+
+# CLI-Anything's repl skin (the generated harness ships an unmodified copy)
+curl -O https://raw.githubusercontent.com/HKUDS/CLI-Anything/main/rms/agent-harness/cli_anything/rms/utils/repl_skin.py
+
+auto-cli pipeline --target library.db --name library --out out --repl-skin repl_skin.py
+```
+
+Expected tail: `result: OK` — with the flavor classified, a registry-ready
+harness under `out/library/`, and its own unit tests passing.
+
+**4. (Windows only) the GUI leg** — drives apps with no API. The provider
+lives in its own repo and installs into a REA *source checkout*, because it
+patches REA's provider registry:
+
+```bash
+git clone https://github.com/morluto/rea.git && cd rea
+git clone https://github.com/Northernator/rea-windows.git ../rea-windows
+../rea-windows/install.sh .
+
+pip install uiautomation pillow        # the provider's dependencies
+
+export REA_BIN="$PWD/scripts/rea.mjs"                  # use the patched checkout
+export REA_WINDOWS_PYTHON="$(python -c 'import sys;print(sys.executable)')"
+
+auto-cli gui --process Notepad --tree
+```
+
+You should see `[gui] backend: REA native-windows provider`. Without this
+step the `gui` command still works, using the built-in UIA driver — the REA
+backend just upgrades the evidence to a real REA envelope.
+
+REA is located via `rea` on PATH, `$REA_BIN`, or an `npx` fallback.
 
 ## Usage
 
