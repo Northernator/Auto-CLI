@@ -271,7 +271,7 @@ def cmd_probe(args) -> int:
             print(f"  probing: rea {cmd} {' '.join(cargs[:2])}...", flush=True)
             results.append(rea_client.run_probe(loc, cmd, cargs, timeout=args.timeout))
         fs = ev.local_filesystem_probe(target)
-    bundle = ev.bundle_from_probes(target, results, fs)
+    bundle = ev.bundle_from_probes(str(target), results, fs)
     out = Path(args.out) / "evidence-bundle.json"
     bundle.save(out)
     ok = sum(1 for p in bundle.probes if p.ok)

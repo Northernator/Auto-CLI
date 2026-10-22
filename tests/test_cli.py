@@ -25,6 +25,17 @@ def test_direct_javascript_target(tmp_path, suffix):
     assert "analyze-javascript-application" in dict(cli._target_probes(target, None))
 
 
+def test_probe_file_target_saves_serializable_bundle(tmp_path, monkeypatch):
+    target = tmp_path / "app.exe"
+    target.touch()
+    monkeypatch.setattr(rea_client, "find_rea", lambda: object())
+    monkeypatch.setattr(rea_client, "run_probe", lambda *a, **k: rea_client.ProbeResult("analyze", [], True, envelope={}))
+    out = tmp_path / "out"
+    assert cli.main(["probe", "--target", str(target), "--out", str(out)]) == 0
+    bundle = evidence.EvidenceBundle.load(out / "evidence-bundle.json")
+    assert bundle.target == str(target.resolve())
+
+
 def test_rea_version_rejects_nonzero_error_text(monkeypatch):
     monkeypatch.setattr(rea_client.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "npm failed"))
     with pytest.raises(subprocess.CalledProcessError):
