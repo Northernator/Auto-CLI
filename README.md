@@ -14,7 +14,7 @@ registry-ready harness skeleton with the evidence attached.
 
 ```
 target app ──► REA probes ──► findings ──► surface classifier ──► scaffold ──► validator
- (no API)      (evidence)     (provenance)   (3 flavors)        (CLI-Anything   (CONTRIBUTING
+ (no API)      (evidence)     (provenance)   (4 flavors)        (CLI-Anything   (CONTRIBUTING
                                                                layout)         rules)
 ```
 
@@ -26,73 +26,92 @@ target app ──► REA probes ──► findings ──► surface classifier 
 | `probe` | run REA recon (`--target` app path or `--url` website) → `evidence-bundle.json` |
 | `surface` | classify a bundle into a harness plan (flavor + commands + risks) |
 | `scaffold` | generate the CLI-Anything harness skeleton from a bundle |
+| `pipeline` | recon → classify → scaffold → validate |
 | `verify` | prove findings against the **live** app; patches constants, writes `VERIFICATION.md` |
 | `drive` | attach to a running app's Inspector, exercise IPC channels, implement `send` |
-| `complete` | generate the domain surface (table groups, endpoint commands) from verified evidence |
+| `complete` | generate table groups from readable schemas and commands for verified endpoints |
 | `gui` | Windows GUI driving via UIA: tree capture + gated actions + scaffold upgrade |
-| `auto` | all of the above in one shot: recon → scaffold → verify → drive → complete → validate |
+| `auto` | recon → scaffold → verify → optional IPC drive → complete → optional GUI capture → validate |
 | `validate` | check a harness against CLI-Anything CONTRIBUTING rules |
 
-Everything is deterministic and offline-capable except the probes themselves;
-REA failures are recorded as limitations, never crashes.
+Classification and scaffold generation work offline from a saved bundle.
+Probes, verification, IPC driving, and GUI driving depend on the target and
+its environment. REA probe failures are recorded in the evidence bundle.
 
 ## Getting started
 
-Three pieces, one chain. Steps 1-2 give you the static pipeline; step 3 is a
-real run; step 4 adds the Windows GUI leg.
+The examples in this section use **Windows PowerShell**. Git, Python 3.10+,
+and a compatible Node.js must be on PATH. Use the same Python environment
+for installation, validation, and generated harnesses.
 
-**1. REA — the recon engine** (Node 22.19+/24.11+)
+**1. REA — the recon engine** ([Node requirements](https://github.com/morluto/rea/blob/main/package.json): 22.19+ within 22.x, 24.11+ within 24.x, or 26+)
 
-```bash
+```powershell
 npm install -g rea-agents
 ```
 
-**2. Auto-CLI — the pipeline** (Python 3.10+, stdlib only)
+**2. Auto-CLI — the pipeline** (Python 3.10+, no required runtime packages)
 
-```bash
-pip install git+https://github.com/Northernator/Auto-CLI.git
-auto-cli doctor          # REA ok: 6.7.0
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install git+https://github.com/Northernator/Auto-CLI.git
+# Validation runs generated tests; generated CLIs import Click.
+python -m pip install pytest click prompt-toolkit
+auto-cli doctor
 ```
 
-**3. One pipeline run** — any SQLite database works as a target:
+`doctor` prints the detected REA version and location. The generated
+harness's `setup.py` declares Click and prompt-toolkit; pytest is its `dev`
+extra. Installing Auto-CLI alone does not install these packages.
 
-```bash
-# a target you can create in one line
-python -c "import sqlite3; c=sqlite3.connect('library.db'); \
-c.executescript('CREATE TABLE books(id INTEGER PRIMARY KEY, title TEXT, author TEXT); \
-INSERT INTO books(title,author) VALUES (\'Dune\',\'Herbert\');'); c.commit()"
+**3. One pipeline run** — use a directory containing a SQLite database:
 
-# CLI-Anything's repl skin (the generated harness ships an unmodified copy)
-curl -O https://raw.githubusercontent.com/HKUDS/CLI-Anything/main/rms/agent-harness/cli_anything/rms/utils/repl_skin.py
+```powershell
+New-Item -ItemType Directory -Path library-demo -Force | Out-Null
+@'
+import sqlite3
+with sqlite3.connect('library-demo/library.db') as connection:
+    connection.executescript("CREATE TABLE IF NOT EXISTS books(id INTEGER PRIMARY KEY, title TEXT, author TEXT); INSERT INTO books(title,author) VALUES ('Dune','Herbert');")
+'@ | python -
 
-auto-cli pipeline --target library.db --name library --out out --repl-skin repl_skin.py
+# Download CLI-Anything's repl skin; without --repl-skin validation fails.
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/HKUDS/CLI-Anything/main/rms/agent-harness/cli_anything/rms/utils/repl_skin.py -OutFile repl_skin.py
+
+auto-cli pipeline --target library-demo --name library --out out --repl-skin repl_skin.py
+python -m pip install -e ./out/library/agent-harness
+cli-anything-library --json info
+cli-anything-library --json query "SELECT title, author FROM books"
 ```
 
-Expected tail: `result: OK` — with the flavor classified, a registry-ready
-harness under `out/library/`, and its own unit tests passing.
+With these dependencies and the real repl skin, the validation tail should
+be `result: OK`, with a harness under `out/library/agent-harness/` and its
+unit tests passing. This checks the generated structure and tests; review
+the reports and exercise the live commands before submitting a registry PR.
 
-**4. (Windows only) the GUI leg** — drives apps with no API. The provider
-lives in its own repo and installs into a REA *source checkout*, because it
-patches REA's provider registry:
+**4. (Windows only) the GUI leg** — capture an already-running app's UI
+with the built-in driver:
 
-```bash
-git clone https://github.com/morluto/rea.git && cd rea
-git clone https://github.com/Northernator/rea-windows.git ../rea-windows
-../rea-windows/install.sh .
-
-pip install uiautomation pillow        # the provider's dependencies
-
-export REA_BIN="$PWD/scripts/rea.mjs"                  # use the patched checkout
-export REA_WINDOWS_PYTHON="$(python -c 'import sys;print(sys.executable)')"
-
-auto-cli gui --process Notepad --tree
+```powershell
+python -m pip install uiautomation
+Start-Process notepad
+auto-cli gui --backend local --process Notepad --tree
 ```
 
-You should see `[gui] backend: REA native-windows provider`. Without this
-step the `gui` command still works, using the built-in UIA driver — the REA
-backend just upgrades the evidence to a real REA envelope.
+`--process` matches a window's **ClassName**, not the executable filename;
+`--pid` or `--title` can select another window. Supplied selectors must
+all match, and multiple matching windows require a narrower selector.
+Use paths from `--tree`
+when driving it, since controls and titles vary by application version.
 
-REA is located via `rea` on PATH, `$REA_BIN`, or an `npx` fallback.
+The optional [rea-windows provider](https://github.com/Northernator/rea-windows#install-into-a-rea-source-checkout)
+captures REA evidence envelopes. Its setup requires a REA source checkout,
+the provider's Bash installer, Python with uiautomation and Pillow, and
+compiling the patched REA checkout. Follow that repository's current build
+instructions, then set the PowerShell variables shown in the GUI section.
+
+REA is located via `REA_BIN` first, then `rea` on PATH, then an `npx`
+fallback (which may download REA).
 
 ## Usage
 
@@ -111,14 +130,22 @@ auto-cli scaffold --bundle forge-out/evidence-bundle.json --name my-app --out fo
 auto-cli validate --dir forge-out/my-app/agent-harness      # CONTRIBUTING.md checks
 ```
 
+The multi-line examples below use Bash syntax; in PowerShell put the
+command on one line or replace a trailing `\` with a backtick.
+
 Options: `--probe <cmd>` (repeatable) to restrict REA commands,
 `--repl-skin <path>` to drop the plugin's unmodified `repl_skin.py` into the
 generated harness (CONTRIBUTING.md requires a real copy), `--author` for the
 registry entry.
 
+Pass `--repl-skin repl_skin.py` to the `scaffold`, `pipeline`, and `auto`
+examples below for validation to pass. Without it, generation still works but the
+placeholder skin deliberately fails validation (exit 2).
+
 ## Pointing it at things
 
-**Desktop apps — pass a path.** Any of these work:
+**Desktop apps — pass a path.** These target forms are accepted; useful
+findings depend on the app and the available REA providers:
 
 ```bash
 # extracted Electron app directory (app.asar or .js files)
@@ -168,16 +195,22 @@ That is the tool working, not failing.
 
 ## What the classifier looks for
 
-| Flavor | REA signal | Generated commands |
+| Flavor | REA signal | Suggested surface |
 | --- | --- | --- |
 | local-server | loopback endpoints (`127.0.0.1:PORT`), Electron IPC channels, context-bridge APIs | `get`, `endpoints`, `channels`, `send` |
 | database | SQLite files in the app bundle | `info`, `schema`, `backup`, `query`, `export` |
-| mcp-face | WebMCP tools / MCP servers | `tools`, `call` |
-| scripting-runtime | embedded Python/JS consoles | `eval` (guarded) |
+| mcp-face | WebMCP tools / MCP servers | `tools`, `call` (requires implementation) |
+| scripting-runtime | embedded Python/JS consoles | `eval` (requires implementation) |
+
+The base scaffold includes the database, HTTP, and IPC inventory commands
+regardless of flavor. MCP and scripting commands are classifier suggestions;
+they are not generated implementations. `unknown` means no supported
+automation surface was found.
 
 Databases trigger the Rekordbox rule: **backup before any write**. The
-generated backend opens SQLite read-only (`mode=ro`), rejects non-SELECT
-statements and multi-statement input, and `backup` refuses to clobber. HTTP
+generated backend opens SQLite read-only (`mode=ro`), allows
+`SELECT`/`WITH`/`EXPLAIN` query prefixes, rejects multi-statement input, and
+`backup` refuses to clobber. HTTP
 `get` is origin-scoped: loopback always, remote hosts only if recon
 discovered them. `send` (IPC) starts as a stub and gets a real
 implementation from `drive` once a channel is confirmed live.
@@ -189,7 +222,7 @@ implementation from `drive` once a channel is confirmed live.
   <NAME>.md                       # SOP doc
   setup.py                        # entry point cli-anything-<name>
   cli_anything/<module>/
-    <module>_cli.py               # Click CLI, --json on every command
+    <module>_cli.py               # Click CLI, global --json before the command
     core/backend.py               # constants baked in from recon + guards
     skills/SKILL.md               # agent-facing manual
     tests/test_core.py            # 8 unit tests, no backend needed
@@ -197,6 +230,13 @@ implementation from `drive` once a channel is confirmed live.
   FORGE-REPORT.md                 # audit trail: probes, findings, risks, todos
   registry-entry.json             # registry.json fragment with all fields
 ```
+
+Install a generated harness with
+`python -m pip install -e ./forge-out/my-app/agent-harness` (replace the path).
+For JSON output, use
+`cli-anything-my-app --json <command>`. GUI-upgraded harnesses also need
+uiautomation in that Python environment; they use their own local UIA
+runner even when REA captured the original tree.
 
 ## Closing the loop: verify against the live app
 
@@ -224,10 +264,11 @@ auto-cli verify --bundle forge-out/evidence-bundle.json \
 auto-cli validate --dir forge-out/my-app/agent-harness   # final gate
 ```
 
-### Experiment: how far does an agent get?
+### Previous demo experiment: how far does an agent get?
 
-Ran on a demo app (Electron-style JS + SQLite library + live REST backend on
-the port REA found in its source). Result: **the agent completed the harness.**
+The following records an earlier demo run (Electron-style JS + SQLite
+library + live REST backend on the port REA found in its source). It is an
+example outcome for that app, not a guarantee for arbitrary targets.
 
 | Step | Who | Outcome |
 | --- | --- | --- |
@@ -239,18 +280,15 @@ the port REA found in its source). Result: **the agent completed the harness.**
 | regression tests | agent | 2 added (verified-shape parse, non-200 rejection) |
 | final validation | tool | 9 commands, 10/10 tests, `result: OK` |
 
-The agent's one bug (forgot to parse the response body) was caught by its own
-test in one iteration. What still needs a human: wiring IPC `send` (needs a
-live app session), choosing the command surface (product judgment), and PR
-review. Verdict: for local-server and database flavors, the loop is closed
-enough that an agent finishes the harness with the verification report in
-hand.
+The agent's response-parsing bug was caught by its test in one iteration.
+IPC `send` needs a live app session (`drive` can wire confirmed channels).
+Choosing the command surface and reviewing the resulting harness still
+require judgment.
 
 ## Driving live sessions: the `drive` command
 
-That last gap — IPC `send` — needs a live app session. REA observes but never
-mutates a target (its own contract), so the split is: **the forge drives, REA
-witnesses.**
+IPC `send` needs a live app session. In this command, REA observes the
+runtime while Auto-CLI evaluates the channel probes and records results.
 
 ```bash
 # app already running with an inspector (Electron: --remote-debugging-port,
@@ -273,7 +311,7 @@ are baked into the backend, tests and SKILL.md are updated, and
 `DRIVE-REPORT.md` records the session. Channels that never respond stay
 unsendable (exit 2).
 
-Live proof on the demo app: REA observed the runtime, the inventory probe
+In the earlier demo run, REA observed the runtime, the inventory probe
 returned `["library:load","library:export"]`, both channels were driven
 (`library:load` → `{"ok":true,"tracks":1}`), and the generated
 `cli-anything-demo-dj send library:load` returned that same response from the
@@ -285,30 +323,30 @@ The GUI leg has two backends. **REA** (preferred) delegates to the
 `native-windows` provider from
 [rea-windows](https://github.com/Northernator/rea-windows), so GUI evidence
 is a real REA evidence envelope. The **built-in** UIA driver is the standalone
-fallback for hosts without the provider. `--backend auto|rea|local` forces
-one; auto probes REA once and falls back silently.
+fallback for hosts without the provider. Choose with
+`--backend auto|rea|local`; auto probes REA and falls back when unavailable.
 
 ```bash
 # auto: REA when available, built-in otherwise
 auto-cli gui --process Notepad --tree
 
-# force one backend
+# request a specific backend
 auto-cli gui --backend rea  --process Notepad --window-id 787822 --tree
 auto-cli gui --backend local --process Notepad --tree
 ```
 
-To use the REA backend, install the provider into a REA checkout
-(`./install.sh /path/to/rea` from the rea-windows repo), then point the forge
-at it:
+To use the REA backend, follow the provider's installation and compilation
+instructions linked above, then point the forge at that checkout:
 
-```bash
-export REA_BIN=/path/to/rea/scripts/rea.mjs        # node-script entries work
-export REA_WINDOWS_PYTHON=$(which python)          # interpreter with uiautomation + Pillow
+```powershell
+$env:REA_BIN = "C:\path\to\rea\scripts\rea.mjs"
+$env:REA_WINDOWS_PYTHON = (python -c "import sys; print(sys.executable)")
+auto-cli gui --backend rea --process Notepad --tree
 ```
 
-REA's native-UI observation is macOS-only, so on Windows the forge drives UI
-Automation itself (`pip install uiautomation`, or `pip install
-auto-cli[gui]`):
+Upstream REA's built-in native-UI provider is macOS-only; rea-windows adds
+Windows support. Auto-CLI's local backend independently drives UI Automation
+with the uiautomation package installed above:
 
 ```bash
 # read-only: capture the actionable tree
@@ -321,19 +359,24 @@ auto-cli gui --title "Untitled" --yes \
     --dir forge-out/my-app/agent-harness        # upgrade the scaffold too
 ```
 
-What it captures: every UIA node with its patterns (Invoke / Value /
-ExpandCollapse / SelectionItem / Toggle), menu paths, and window screenshots
-as action evidence. Paths accept any unique suffix, so callers don't track
-window titles.
+What it captures: UIA nodes up to the configured depth and node limit,
+with their patterns (Invoke / Value / ExpandCollapse / SelectionItem /
+Toggle), plus expandable menu paths. Successful actions can include a
+window screenshot. Paths accept suffixes; choose an unambiguous path from
+the captured tree.
 
 Safety model: `tree`/`menus` are read-only; every driving action requires
 `--yes`; paths matching save/close/delete/exit/format are refused even with
 `--yes` unless `--allow-destructive`.
 
-The scaffold gets a `ui` command group backed by a self-contained
+The scaffold gets top-level `ui-*` commands backed by a self-contained
 `utils/uia_runner.py` copied into the harness (no auto_cli dependency at
 runtime): `ui-tree`, `ui-menus`, `ui-invoke`, `ui-select`, `ui-set-text` —
-all with the same gates.
+actions require `--yes` and failures exit 2. These generated commands
+refuse destructive-looking paths; the generated CLI does not expose the
+runner's `--allow-destructive` override. The harness stores the captured
+window title, so a later title change can require updating its target
+constants before it can find that window again.
 
 And it's wired into `auto`:
 
@@ -342,21 +385,23 @@ auto-cli auto --target "C:/Windows/System32/notepad.exe" --name notepad \
     --gui-process Notepad --gui-title "Untitled"
 ```
 
-Live run on a fresh untitled Notepad: REA found nothing useful (correct — a
-native GUI binary has no static automation surface), the GUI leg captured 51
-nodes / 8 menu paths, the scaffold was upgraded, `result: OK`, and the
-generated `ui-set-text` wrote text into the live window.
+An earlier run on an untitled Notepad reported 51 nodes / 8 menu paths,
+a scaffold upgrade, `result: OK`, and text written through the generated
+`ui-set-text`. UIA exposure varies between Notepad builds; capture and test
+the installed version before relying on those paths.
 
-### Platform boundaries (measured, not guessed)
+### Platform boundaries
 
-- **GUI driving is now built for Windows.** The forge drives UIAutomation
-  directly (REA's native-UI leg is macOS-only), with before/after evidence and
-  screenshots per action. `gui` command + `--gui-*` flags on `auto`.
+- **GUI driving is built for Windows.** Use the built-in UIAutomation
+  backend or the optional rea-windows provider. `gui` records action
+  results and available screenshots; `--gui-*` flags add GUI capture and
+  scaffold upgrade to `auto`.
 - **`capture-process` is unavailable on native Windows** — REA's PTY adapter
   requires Linux/WSL/macOS. Recorded as a failed probe with REA's own message,
   never a crash.
-- **REA never mutates targets** — no launch/resume/evaluate/pause. All driving
-  is done by auto-cli itself; REA supplies the witnessed evidence.
+- **Recon and driving are separate.** `drive` exercises live IPC channels;
+  GUI actions run through the local UIA driver or the optional provider
+  with explicit action flags and confirmation gates.
 - Proxy environments: 502/503/504 on loopback is flagged as proxy-suspect, not
   app behavior.
 
@@ -374,17 +419,18 @@ Chain: recon → scaffold → (launch app if `--launch` given) → verify → dr
 **complete** → validate (+ one repair pass with `--repair`). Works for
 `--target` and `--url`.
 
-`complete` is the piece that removes the agent: it generates the domain
-surface from *verified evidence only* — one command group per database table
+`complete` generates the domain surface from readable database schemas and
+verified endpoint checks: one command group per supported database table
 (`list`/`get`/`search`/`add`/`update`/`delete`), one command per verified
-endpoint, tests from observed shapes, and a SKILL.md documenting all of it.
-Nothing is guessed: an endpoint that failed verification gets no command.
+endpoint, database tests, and a SKILL.md documenting the additions.
+An endpoint that failed verification gets no command; POST endpoints remain
+stubs requiring auth and request-body wiring.
 
 Safety is structural: reads use a read-only connection, writes require `--yes`
 and take a timestamped backup first, identifiers are quoted, payloads are
 validated against the live schema.
 
-### What `auto` produced on the demo app, unattended
+### What `auto` produced in the previous demo run, unattended
 
 ```
 verify:  {'unverifiable': 5, 'verified': 2, 'failed': 1}
@@ -394,19 +440,21 @@ endpoint commands: library-tracks
 result: OK
 ```
 
-And the generated commands work against the live app: `tracks list`,
+That run exercised the generated commands against its live app: `tracks list`,
 `tracks search Solar`, `library-tracks` (verified endpoint, parsed JSON),
 `send library:export --message '{"format":"m3u"}'` (live channel),
 `tracks add --yes` (backup taken, row inserted). `add` without `--yes` exits 2.
 
 ## What it deliberately does NOT do
 
-- **It does not auto-write your harness.** CLI-Anything is hand-written by
-  design; this produces a compliant skeleton plus a report of what a human
-  must verify. The `FORGE-REPORT.md` lists every finding with provenance
-  (REA command, artifact sha256, source location) and the open questions.
-- **It does not run the target app unattended.** Recon is static unless you
-  give it `--url`/`--inspector`/`--launch` and a live target to drive.
+- **It does not implement every app-specific workflow.** `scaffold` produces
+  generic commands; `drive`, `complete`, and `gui` can add working surface
+  from live evidence. MCP, scripting, auth, POST bodies, and unsupported
+  transports still need implementation and review. `FORGE-REPORT.md` records
+  findings, available provenance, and open questions.
+- **It does not launch arbitrary desktop apps by default.** Filesystem recon
+  is static. `--url` launches a browser, `--launch` starts the supplied
+  command, and IPC/GUI driving needs an accessible live target.
 - **It does not benchmark agents.** No success-rate claims.
 
 ## Development

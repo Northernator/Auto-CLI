@@ -367,7 +367,7 @@ def test_act_via_rea_refuses_without_yes(monkeypatch):
 
 
 @pytest.mark.parametrize("path", ["App > Text editor", "Text editor"])
-def test_act_via_rea_maps_to_rea_steps(monkeypatch, path):
+def test_act_via_rea_maps_to_rea_steps(monkeypatch, path, tmp_path):
     from auto_cli import rea_client
     seen = {}
 
@@ -388,11 +388,13 @@ def test_act_via_rea_maps_to_rea_steps(monkeypatch, path):
     monkeypatch.setattr(rea_client, "run_probe", fake_run)
     nodes = gui_mod._rea_nodes_to_ui(REA_ENVELOPE["normalized_result"]["initial"]["nodes"], window_title="App")
     result = gui_mod.act_via_rea(
-        FakeRea(), 787822, "set-value", path, "hello", pid=10516, yes=True, nodes=nodes
+        FakeRea(), 787822, "set-value", path, "hello", pid=10516, yes=True, nodes=nodes, shot_dir=tmp_path
     )
     assert result.ok is True
     assert seen["command"] == "capture-native-ui-scenario"
     assert seen["steps"] == [{"kind": "key-entry", "path": [0, 1], "text": "hello"}]
+    assert result.screenshot == ""
+    assert "evidence: ev_test" in result.detail
 
 
 def test_act_via_rea_refuses_destructive_paths():

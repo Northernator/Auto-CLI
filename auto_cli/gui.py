@@ -540,10 +540,10 @@ def act_via_rea(
     outcome = steps[0]
     result.ok = outcome.get("outcome") == "completed"
     result.detail = str(outcome.get("reason") or "completed")
-    if shot_dir and result.ok:
-        shot = Path(shot_dir) / f"rea-gui-{int(time.time())}.png"
-        result.screenshot = str(shot)
-        result.detail += f" | evidence: {probe.envelope.get('evidence_id', '')[:16]}"
+    if result.ok and probe.envelope.get("evidence_id"):
+        # REA owns the evidence artifacts; do not invent a local screenshot
+        # filename when this driver has not written an image there.
+        result.detail += f" | evidence: {probe.envelope['evidence_id'][:16]}"
     return result
 
 
