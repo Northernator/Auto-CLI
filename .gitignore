@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+forge-out/
+forge-auto/
+forge-gui/
+forge-gui-app/
+.coverage
