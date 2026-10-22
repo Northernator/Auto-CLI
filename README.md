@@ -2,6 +2,24 @@
 
 **Point it at software. Get an agent-native CLI.**
 
+## A real Windows app, driven by its generated CLI
+
+![Auto-CLI generates a Notepad CLI, writes release notes, and reads them back](docs/notepad-demo.gif)
+
+[Watch the MP4](docs/notepad-demo.mp4) · [Run the Notepad example](examples/notepad-demo.ps1)
+
+This demo uses the real Windows Notepad: Auto-CLI generates a harness from
+recon and the live UI, then the generated commands write a release checklist,
+read it back, and export the retrieved text to `release-notes.txt`. This is
+an edited demonstration assembled from actual window captures and command
+output; setup waits are shortened. The GUI uses the built-in Windows UIA
+backend.
+
+The demo was tested with classic English-language Notepad. Modern or
+localized builds can expose different controls; inspect `ui-tree` before
+reusing paths. The export writes the text returned by `ui-read-text` to a
+local file; it does not invoke Notepad's Save command.
+
 ![auto-cli pipeline: from app to harness](docs/pipeline.jpg)
 
 [REA](https://github.com/morluto/rea) (`npm i -g rea-agents`) reverse-engineers
@@ -38,64 +56,82 @@ Classification and scaffold generation work offline from a saved bundle.
 Probes, verification, IPC driving, and GUI driving depend on the target and
 its environment. REA probe failures are recorded in the evidence bundle.
 
-## Getting started
+## Copy-and-paste quickstart (Windows PowerShell)
 
-The examples in this section use **Windows PowerShell**. Git, Python 3.10+,
-and a compatible Node.js must be on PATH. Use the same Python environment
-for installation, validation, and generated harnesses.
+Install Git, Python 3.10+, and a supported Node.js version first; all three
+must be on PATH. [REA's Node requirements](https://github.com/morluto/rea/blob/main/package.json)
+are 22.19+ within 22.x, 24.11+ within 24.x, or 26+.
 
-**1. REA — the recon engine** ([Node requirements](https://github.com/morluto/rea/blob/main/package.json): 22.19+ within 22.x, 24.11+ within 24.x, or 26+)
-
-```powershell
-npm install -g rea-agents
-```
-
-**2. Auto-CLI — the pipeline** (Python 3.10+, no required runtime packages)
+Paste this **whole block** into PowerShell. It creates an isolated
+`auto-cli-demo` folder, installs from GitHub `main`, generates a working
+library CLI, searches its books, and exports CSV. No environment activation
+or execution-policy change is needed.
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install git+https://github.com/Northernator/Auto-CLI.git
-# Validation runs generated tests; generated CLIs import Click.
-python -m pip install pytest click prompt-toolkit
-auto-cli doctor
-```
+& {
+    $ErrorActionPreference = 'Stop'
+    function Invoke-DemoNative {
+        param([string] $Command, [Parameter(ValueFromRemainingArguments = $true)][string[]] $Arguments)
+        & $Command @Arguments
+        if ($LASTEXITCODE -ne 0) { throw "$Command failed (exit $LASTEXITCODE)" }
+    }
 
-`doctor` prints the detected REA version and location. The generated
-harness's `setup.py` declares Click and prompt-toolkit; pytest is its `dev`
-extra. Installing Auto-CLI alone does not install these packages.
+    New-Item -ItemType Directory -Path auto-cli-demo -Force | Out-Null
+    Push-Location auto-cli-demo
+    $previousReaBin = $env:REA_BIN
+    try {
+        Invoke-DemoNative npm.cmd install --prefix .tools rea-agents
+        $env:REA_BIN = (Resolve-Path .tools/node_modules/rea-agents/scripts/rea.mjs).Path
+        Invoke-DemoNative python -m venv .venv
+        $python = Join-Path $PWD '.venv\Scripts\python.exe'
+        # pytest validates generated tests; Click and prompt-toolkit run the CLI.
+        Invoke-DemoNative $python -m pip install 'git+https://github.com/Northernator/Auto-CLI.git@main' pytest click prompt-toolkit
+        Invoke-DemoNative $python -m auto_cli doctor
 
-**3. One pipeline run** — use a directory containing a SQLite database:
-
-```powershell
-New-Item -ItemType Directory -Path library-demo -Force | Out-Null
-@'
+        New-Item -ItemType Directory -Path library-demo -Force | Out-Null
+        @'
 import sqlite3
 with sqlite3.connect('library-demo/library.db') as connection:
-    connection.executescript("CREATE TABLE IF NOT EXISTS books(id INTEGER PRIMARY KEY, title TEXT, author TEXT); INSERT INTO books(title,author) VALUES ('Dune','Herbert');")
-'@ | python -
+    connection.executescript("""
+        CREATE TABLE IF NOT EXISTS books(id INTEGER PRIMARY KEY, title TEXT, author TEXT);
+        INSERT OR IGNORE INTO books VALUES (1, 'Dune', 'Frank Herbert');
+        INSERT OR IGNORE INTO books VALUES (2, 'The Left Hand of Darkness', 'Ursula K. Le Guin');
+    """)
+'@ | & $python -
+        if ($LASTEXITCODE -ne 0) { throw 'Could not create the demo database' }
 
-# Download CLI-Anything's repl skin; without --repl-skin validation fails.
-Invoke-WebRequest -Uri https://raw.githubusercontent.com/HKUDS/CLI-Anything/main/rms/agent-harness/cli_anything/rms/utils/repl_skin.py -OutFile repl_skin.py
-
-auto-cli pipeline --target library-demo --name library --out out --repl-skin repl_skin.py
-python -m pip install -e ./out/library/agent-harness
-cli-anything-library --json info
-cli-anything-library --json query "SELECT title, author FROM books"
+        # Validation needs CLI-Anything's actual repl skin.
+        Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/HKUDS/CLI-Anything/main/rms/agent-harness/cli_anything/rms/utils/repl_skin.py' -OutFile repl_skin.py
+        Invoke-DemoNative $python -m auto_cli auto --target library-demo --name library --out out --repl-skin repl_skin.py
+        Invoke-DemoNative $python -m pip install --editable ./out/library/agent-harness
+        $library = Join-Path $PWD '.venv\Scripts\cli-anything-library.exe'
+        Invoke-DemoNative $library --json books list
+        Invoke-DemoNative $library --json books search Dune
+        Invoke-DemoNative $library export books books.csv --format csv
+        Get-Content books.csv
+        Write-Host "Generated CLI and CSV: $PWD"
+    }
+    finally {
+        $env:REA_BIN = $previousReaBin
+        Pop-Location
+    }
+}
 ```
 
-With these dependencies and the real repl skin, the validation tail should
-be `result: OK`, with a harness under `out/library/agent-harness/` and its
-unit tests passing. This checks the generated structure and tests; review
-the reports and exercise the live commands before submitting a registry PR.
+Expect `result: OK`, a search result containing `Dune`, and a CSV containing
+both books. The generated harness and reports are in
+`auto-cli-demo/out/library/agent-harness/`. Auto-CLI itself has no required
+runtime packages; the block explicitly installs the generated harness's
+runtime and validation dependencies.
 
-**4. (Windows only) the GUI leg** — capture an already-running app's UI
-with the built-in driver:
+To try the live Windows app shown above, follow
+[the Notepad example](examples/notepad-demo.ps1) after this setup. It uses
+the same virtual environment and installs the optional `uiautomation`
+package for the GUI leg. To inspect an already-running app directly:
 
 ```powershell
-python -m pip install uiautomation
-Start-Process notepad
-auto-cli gui --backend local --process Notepad --tree
+& .\auto-cli-demo\.venv\Scripts\python.exe -m pip install uiautomation
+& .\auto-cli-demo\.venv\Scripts\python.exe -m auto_cli gui --backend local --process Notepad --tree
 ```
 
 `--process` matches a window's **ClassName**, not the executable filename;
@@ -371,12 +407,14 @@ Safety model: `tree`/`menus` are read-only; every driving action requires
 
 The scaffold gets top-level `ui-*` commands backed by a self-contained
 `utils/uia_runner.py` copied into the harness (no auto_cli dependency at
-runtime): `ui-tree`, `ui-menus`, `ui-invoke`, `ui-select`, `ui-set-text` —
+runtime): `ui-tree`, `ui-menus`, `ui-read-text`, `ui-invoke`, `ui-select`,
+`ui-set-text`. Tree capture, menu listing, and text reads are read-only;
 actions require `--yes` and failures exit 2. These generated commands
 refuse destructive-looking paths; the generated CLI does not expose the
 runner's `--allow-destructive` override. The harness stores the captured
-window title, so a later title change can require updating its target
-constants before it can find that window again.
+window's process ID, class, and title to target that app session. Restarting
+the app or changing the document's title can require regenerating the
+harness or recapturing its GUI target.
 
 And it's wired into `auto`:
 
