@@ -57,8 +57,10 @@ def test_upgrade_scaffold_adds_ui_group(tmp_path, built):
     assert gui_mod.upgrade_scaffold(root, r) is True
     cli = (root / "cli_anything" / "gui_app" / "gui_app_cli.py").read_text()
     assert "def ui_tree" in cli
+    assert "def ui_read_text" in cli
     assert "def ui_invoke" in cli
     assert "TARGET_WINDOW_PROCESS" in (root / "cli_anything" / "gui_app" / "core" / "backend.py").read_text()
+    assert "TARGET_WINDOW_PID = 1234" in (root / "cli_anything" / "gui_app" / "core" / "backend.py").read_text()
     assert (root / "cli_anything" / "gui_app" / "utils" / "uia_runner.py").exists()
     # idempotent
     assert gui_mod.upgrade_scaffold(root, r) is False
@@ -96,6 +98,7 @@ def test_skill_documents_gui_surface(tmp_path, built):
     skill = (root / "cli_anything" / "gui_app" / "skills" / "SKILL.md").read_text()
     assert "GUI surface" in skill
     assert "Notepad > File" in skill
+    assert 'ui-read-text "<path>"' in skill
 
 
 def test_report_markdown():
@@ -213,6 +216,99 @@ def test_generated_runner_reports_ambiguous_target(driver, monkeypatch, capsys):
     assert "multiple windows" in payload["detail"]
 
 
+@pytest.fixture()
+def generated_runner(monkeypatch):
+    root = FakeControl()
+    fake_auto = types.SimpleNamespace(GetRootControl=lambda: root)
+    monkeypatch.setitem(sys.modules, "uiautomation", fake_auto)
+    runner = types.ModuleType("read_text_uia_runner")
+    exec(compile(gui_mod.UIA_RUNNER_PY, "uia_runner.py", "exec"), runner.__dict__)
+    return types.SimpleNamespace(root=root, module=runner)
+
+
+def _run_generated(runner, monkeypatch, capsys, command, path, *flags):
+    monkeypatch.setattr(sys, "argv", ["uia_runner.py", command, path, "--process", "App", *flags])
+    status = runner.module.main()
+    return status, json.loads(capsys.readouterr().out)
+
+
+@pytest.mark.parametrize("text", ["", "Release notes\nFixed export – ready to ship."])
+def test_generated_runner_reads_value_without_confirmation(generated_runner, monkeypatch, capsys, text):
+    editor = FakeControl("Save preview")
+    editor.GetValuePattern = Mock(return_value=types.SimpleNamespace(Value=text))
+    generated_runner.root.children = [FakeControl("Window", children=[editor])]
+    status, payload = _run_generated(generated_runner, monkeypatch, capsys, "read-text", "Save preview")
+    assert status == 0
+    assert payload == {"ok": True, "path": "Save preview", "text": text}
+    editor.invoke.assert_not_called()
+
+
+@pytest.mark.parametrize("value_error", [False, True])
+def test_generated_runner_reads_document_text(generated_runner, monkeypatch, capsys, value_error):
+    editor = FakeControl("Text editor")
+    if value_error:
+        editor.GetValuePattern = Mock(side_effect=RuntimeError("Value pattern unavailable"))
+    get_text = Mock(return_value="Actual document contents\n")
+    editor.GetTextPattern = Mock(return_value=types.SimpleNamespace(DocumentRange=types.SimpleNamespace(GetText=get_text)))
+    generated_runner.root.children = [FakeControl("Window", children=[editor])]
+    status, payload = _run_generated(generated_runner, monkeypatch, capsys, "read-text", "Text editor")
+    assert status == 0
+    assert payload["text"] == "Actual document contents\n"
+    get_text.assert_called_once_with(-1)
+    editor.invoke.assert_not_called()
+
+
+def test_generated_runner_read_text_reports_unsupported_control(generated_runner, monkeypatch, capsys):
+    generated_runner.root.children = [FakeControl("Window", children=[FakeControl("Button")])]
+    status, payload = _run_generated(generated_runner, monkeypatch, capsys, "read-text", "Button")
+    assert status == 2
+    assert payload["ok"] is False
+    assert "readable Value or Text" in payload["detail"]
+    assert "text" not in payload
+
+
+def test_generated_runner_read_text_reports_stale_control(generated_runner, monkeypatch, capsys):
+    editor = FakeControl("Text editor")
+    editor.GetValuePattern = Mock(side_effect=RuntimeError("element is stale"))
+    editor.GetTextPattern = Mock(side_effect=RuntimeError("element is stale"))
+    generated_runner.root.children = [FakeControl("Window", children=[editor])]
+    status, payload = _run_generated(generated_runner, monkeypatch, capsys, "read-text", "Text editor")
+    assert status == 2
+    assert payload["ok"] is False
+    assert "element is stale" in payload["detail"]
+
+
+def test_generated_runner_read_text_refuses_ambiguous_path(generated_runner, monkeypatch, capsys):
+    editors = [FakeControl("Text editor"), FakeControl("Text editor")]
+    for editor in editors:
+        editor.GetValuePattern = Mock()
+    generated_runner.root.children = [FakeControl("Window", children=editors)]
+    status, payload = _run_generated(generated_runner, monkeypatch, capsys, "read-text", "Text editor")
+    assert status == 2
+    assert "ambiguous node" in payload["detail"]
+    for editor in editors:
+        editor.GetValuePattern.assert_not_called()
+
+
+@pytest.mark.parametrize("command", ["invoke", "select", "set-value"])
+def test_generated_runner_mutations_still_require_confirmation(generated_runner, monkeypatch, capsys, command):
+    target = FakeControl("Text editor")
+    generated_runner.root.children = [FakeControl("Window", children=[target])]
+    status, payload = _run_generated(generated_runner, monkeypatch, capsys, command, "Text editor")
+    assert status == 2
+    assert "--yes" in payload["detail"]
+    target.invoke.assert_not_called()
+
+
+def test_generated_runner_mutations_still_refuse_destructive_paths(generated_runner, monkeypatch, capsys):
+    target = FakeControl("Save")
+    generated_runner.root.children = [FakeControl("Window", children=[target])]
+    status, payload = _run_generated(generated_runner, monkeypatch, capsys, "invoke", "Save", "--yes")
+    assert status == 2
+    assert "destructive" in payload["detail"]
+    target.invoke.assert_not_called()
+
+
 def test_write_report_creates_output_directory(tmp_path):
     report = gui_mod.write_report(_report([]), tmp_path / "new" / "gui")
     assert report.is_file()
@@ -233,6 +329,48 @@ def test_generated_ui_command_exits_nonzero_on_runner_failure(monkeypatch):
     result = CliRunner().invoke(main, ["ui-tree"])
     assert result.exit_code == 2
     assert json.loads(result.output)["ok"] is False
+
+
+def test_generated_ui_read_text_forwards_without_confirmation(monkeypatch):
+    import click
+    from click.testing import CliRunner
+
+    @click.group()
+    def main():
+        pass
+
+    namespace = {"click": click, "main": main, "_emit": lambda ctx, payload: click.echo(json.dumps(payload))}
+    exec(gui_mod.UI_CLI_TEMPLATE, namespace)
+    run = Mock(return_value={"ok": True, "path": "Text editor", "text": "Release notes"})
+    monkeypatch.setitem(namespace, "_uia_run", run)
+    result = CliRunner().invoke(main, ["ui-read-text", "Text editor"])
+    assert result.exit_code == 0
+    assert json.loads(result.output)["text"] == "Release notes"
+    run.assert_called_once_with(["read-text", "Text editor"])
+
+
+def test_generated_ui_runner_preserves_captured_pid(tmp_path, monkeypatch):
+    import click
+
+    @click.group()
+    def main():
+        pass
+
+    namespace = {
+        "click": click, "main": main, "json": json,
+        "__file__": str(tmp_path / "notes_cli.py"),
+        "backend": types.SimpleNamespace(
+            TARGET_WINDOW_PROCESS="Notepad", TARGET_WINDOW_TITLE="Untitled - Notepad", TARGET_WINDOW_PID=1234,
+        ),
+    }
+    exec(gui_mod.UI_CLI_TEMPLATE, namespace)
+    run = Mock(return_value=types.SimpleNamespace(stdout='{"ok": true}', stderr=""))
+    monkeypatch.setattr(namespace["_sp"], "run", run)
+    assert namespace["_uia_run"](["tree"]) == {"ok": True}
+    args = run.call_args.args[0]
+    assert args[args.index("--pid") + 1] == "1234"
+    assert args[args.index("--process") + 1] == "Notepad"
+    assert args[args.index("--title") + 1] == "Untitled - Notepad"
 
 
 @pytest.fixture(autouse=True)

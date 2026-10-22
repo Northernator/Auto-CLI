@@ -550,7 +550,7 @@ def act_via_rea(
 UIA_RUNNER_PY = '''#!/usr/bin/env python3
 """Self-contained UIA runner for this harness.
 
-Subcommands: tree | menus | invoke <path> | select <path> | set-value <path> <text>
+Subcommands: tree | menus | read-text <path> | invoke <path> | select <path> | set-value <path> <text>
 Finds the target window by process class or title. Every driving action
 requires --yes. Requires: pip install uiautomation
 """
@@ -649,6 +649,25 @@ def resolve(window, path):
     return matches[0] if matches else None
 
 
+def read_text(node):
+    errors = []
+    for pattern_name in ("Value", "Text"):
+        try:
+            pattern = getattr(node, f"Get{pattern_name}Pattern", lambda: None)()
+            if pattern is None:
+                continue
+            text = pattern.Value if pattern_name == "Value" else pattern.DocumentRange.GetText(-1)
+            if not isinstance(text, str):
+                raise TypeError("text pattern returned a non-string value")
+            return text
+        except Exception as e:
+            errors.append(f"{pattern_name}: {type(e).__name__}: {e}")
+    detail = "control does not expose readable Value or Text patterns"
+    if errors:
+        detail += "; " + "; ".join(errors)
+    raise ValueError(detail)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd")
@@ -678,23 +697,26 @@ def main():
         print(json.dumps({"ok": True, "menus": menus}))
         return 0
 
-    if not a.yes:
+    if a.cmd != "read-text" and not a.yes:
         print(json.dumps({"ok": False, "detail": "driving requires --yes"}))
         return 2
     path = a.args[0] if a.args else ""
-    if DESTRUCTIVE_RE.search(path) and not a.allow_destructive:
+    if a.cmd != "read-text" and DESTRUCTIVE_RE.search(path) and not a.allow_destructive:
         print(json.dumps({"ok": False, "detail": "destructive-looking path refused"}))
         return 2
     try:
         node = resolve(window, path)
-    except ValueError as e:
+    except Exception as e:
         print(json.dumps({"ok": False, "detail": str(e)}))
         return 2
     if not node:
         print(json.dumps({"ok": False, "detail": "node not found: " + path}))
         return 2
     try:
-        if a.cmd == "invoke":
+        if a.cmd == "read-text":
+            print(json.dumps({"ok": True, "path": path, "text": read_text(node)}))
+            return 0
+        elif a.cmd == "invoke":
             node.GetInvokePattern().Invoke()
         elif a.cmd == "select":
             node.GetSelectionItemPattern().Select()
@@ -732,6 +754,8 @@ def _uia_run(args: list[str]) -> dict:
         cmd += ["--process", backend.TARGET_WINDOW_PROCESS]
     if backend.TARGET_WINDOW_TITLE:
         cmd += ["--title", backend.TARGET_WINDOW_TITLE]
+    if getattr(backend, "TARGET_WINDOW_PID", 0):
+        cmd += ["--pid", str(backend.TARGET_WINDOW_PID)]
     try:
         proc = _sp.run(cmd, capture_output=True, text=True, timeout=60)
     except (OSError, _sp.SubprocessError) as e:
@@ -764,6 +788,14 @@ def ui_tree(ctx: click.Context) -> None:
 def ui_menus(ctx: click.Context) -> None:
     """List expandable menu paths (read-only)."""
     _uia_emit(ctx, ["menus"])
+
+
+@main.command("ui-read-text")
+@click.argument("path")
+@click.pass_context
+def ui_read_text(ctx: click.Context, path: str) -> None:
+    """Read a UIA Value or Text element's contents (read-only)."""
+    _uia_emit(ctx, ["read-text", path])
 
 
 @main.command("ui-invoke")
@@ -807,7 +839,7 @@ def test_ui_commands_exist():
     from cli_anything.{module} import {module}_cli
 
     names = {{c.name for c in {module}_cli.main.commands.values()}}
-    assert {{"ui-tree", "ui-menus", "ui-invoke", "ui-select", "ui-set-text"}} <= names
+    assert {{"ui-tree", "ui-menus", "ui-read-text", "ui-invoke", "ui-select", "ui-set-text"}} <= names
 '''
 
 
@@ -838,6 +870,7 @@ def upgrade_scaffold(root: Path, report: GuiReport) -> bool:
         "ALLOWED_ORIGINS = ",
         f"TARGET_WINDOW_PROCESS = {report.process!r}\n"
         f"TARGET_WINDOW_TITLE = {report.window!r}\n"
+        f"TARGET_WINDOW_PID = {report.pid!r}\n"
         "ALLOWED_ORIGINS = ",
         1,
     )
@@ -857,6 +890,7 @@ def upgrade_scaffold(root: Path, report: GuiReport) -> bool:
         "Read-only:\n\n```bash\n"
         f"{'cli-anything-' + module.replace('_', '-')} ui-tree\n"
         f"{'cli-anything-' + module.replace('_', '-')} ui-menus\n"
+        f"{'cli-anything-' + module.replace('_', '-')} ui-read-text \"<path>\"\n"
         "```\n\n"
         "Driving (all require --yes):\n\n```bash\n"
         f"{'cli-anything-' + module.replace('_', '-')} ui-invoke \"<path>\" --yes\n"
