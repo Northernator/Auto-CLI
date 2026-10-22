@@ -139,16 +139,22 @@ def find_window(
     process: str | None = None,
     title_contains: str | None = None,
 ):
-    """Find a top-level window by pid, process name, or title substring."""
+    """Find one top-level window matching every supplied selector."""
     _require_uia()
+    if not any((pid, process, title_contains)):
+        return None
+    matches = []
     for w in auto.GetRootControl().GetChildren():
-        if pid and w.ProcessId == pid:
-            return w
-        if process and (w.ClassName or "").lower() == process.lower():
-            return w
-        if title_contains and title_contains.lower() in (w.Name or "").lower():
-            return w
-    return None
+        if pid and w.ProcessId != pid:
+            continue
+        if process and (w.ClassName or "").lower() != process.lower():
+            continue
+        if title_contains and title_contains.lower() not in (w.Name or "").lower():
+            continue
+        matches.append(w)
+    if len(matches) > 1:
+        raise GuiError("multiple windows match; narrow the target with --pid or --title")
+    return matches[0] if matches else None
 
 
 def find_window_by_handle(window_id: int):
@@ -173,6 +179,8 @@ def capture_tree(window, maxdepth: int = 6, maxnodes: int = 400) -> list[UiNode]
         if depth > maxdepth or len(nodes) >= maxnodes:
             return
         for child in ctrl.GetChildren():
+            if len(nodes) >= maxnodes:
+                return
             name = child.Name or ""
             ct = child.ControlTypeName or ""
             pats = []
@@ -216,6 +224,7 @@ def _find_node(window, path: str):
     parts = [p for p in path.split(" > ") if p]
     if not parts:
         return None
+    exact = []
     found = []
 
     def walk(ctrl, chain: list[str], depth: int) -> None:
@@ -224,17 +233,18 @@ def _find_node(window, path: str):
         for child in ctrl.GetChildren():
             name = child.Name or ""
             ct = child.ControlTypeName or ""
-            full = chain + [name]
-            if (
-                name == parts[-1]
-                and " > ".join(full) == " > ".join(parts)
-                or " > ".join(full[-len(parts):]) == " > ".join(parts)
-            ):
+            full = chain + [name or ct]
+            if full == parts:
+                exact.append(child)
+            elif full[-len(parts):] == parts:
                 found.append(child)
             walk(child, chain + [name or ct], depth + 1)
 
     walk(window, [window.Name or "window"], 1)
-    return found[0] if found else None
+    matches = exact or found
+    if len(matches) > 1:
+        raise GuiError("ambiguous node path; use a unique full path from the live tree")
+    return matches[0] if matches else None
 
 
 def screenshot(window, out_path: str | Path) -> str:
@@ -257,7 +267,11 @@ def act(
 ) -> GuiAction:
     """Perform one UIA action with before/after evidence."""
     result = GuiAction(action=action, path=path, value=value)
-    node = _find_node(window, path)
+    try:
+        node = _find_node(window, path)
+    except GuiError as e:
+        result.detail = str(e)
+        return result
     if node is None:
         result.detail = "node not found in the live tree"
         return result
@@ -328,35 +342,25 @@ def window_executable(pid: int) -> str:
     """Resolve a process's executable path for REA's target argument."""
     try:
         import ctypes
+        from ctypes import wintypes
 
         kernel32 = ctypes.windll.kernel32
+        # ctypes otherwise assumes c_int return values and truncates HANDLEs
+        # on 64-bit Python, preventing REA from resolving the target process.
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.QueryFullProcessImageNameW.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)
+        ]
+        kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
         handle = kernel32.OpenProcess(0x1000, False, pid)
         if not handle:
             return ""
         try:
             buf = ctypes.create_unicode_buffer(1024)
-            size = ctypes.c_ulong(1024)
-            if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
-                return buf.value
-        finally:
-            kernel32.CloseHandle(handle)
-    except Exception:
-        pass
-    return ""
-
-
-def window_executable(pid: int) -> str:
-    """Resolve a process's executable path for REA's target argument."""
-    try:
-        import ctypes
-
-        kernel32 = ctypes.windll.kernel32
-        handle = kernel32.OpenProcess(0x1000, False, pid)
-        if not handle:
-            return ""
-        try:
-            buf = ctypes.create_unicode_buffer(1024)
-            size = ctypes.c_ulong(1024)
+            size = wintypes.DWORD(1024)
             if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
                 return buf.value
         finally:
@@ -482,12 +486,13 @@ def act_via_rea(
     from . import rea_client
 
     result = GuiAction(action=action, path=path, value=value)
-    int_path = None
-    if nodes:
-        for node in nodes:
-            if node.path == path:
-                int_path = getattr(node, "rea_path", None)
-                break
+    matches = [node for node in (nodes or []) if node.path == path]
+    if not matches:
+        matches = [node for node in (nodes or []) if node.path.endswith(" > " + path)]
+    if len(matches) > 1:
+        result.detail = "ambiguous node path; use a unique full path from the live tree"
+        return result
+    int_path = matches[0].rea_path if matches else None
     if int_path is None:
         result.detail = "node not present in the last REA capture"
         return result
@@ -498,7 +503,10 @@ def act_via_rea(
         result.detail = "refused: destructive-looking path (use --allow-destructive to override)"
         return result
 
-    kind = {"invoke": "click", "set-value": "key-entry", "select": "click"}[action]
+    kind = {"invoke": "click", "set-value": "key-entry", "select": "click"}.get(action)
+    if kind is None:
+        result.detail = f"unknown action: {action}"
+        return result
     step = {"kind": kind, "path": int_path}
     if kind == "key-entry":
         step["text"] = value
@@ -565,23 +573,31 @@ DESTRUCTIVE_RE = re.compile(
 
 
 def find_window(process=None, title=None, pid=None):
+    if not any((process, title, pid)):
+        return None
+    matches = []
     for w in auto.GetRootControl().GetChildren():
-        if pid and w.ProcessId == pid:
-            return w
-        if process and (w.ClassName or "").lower() == process.lower():
-            return w
-        if title and title.lower() in (w.Name or "").lower():
-            return w
-    return None
+        if pid and w.ProcessId != pid:
+            continue
+        if process and (w.ClassName or "").lower() != process.lower():
+            continue
+        if title and title.lower() not in (w.Name or "").lower():
+            continue
+        matches.append(w)
+    if len(matches) > 1:
+        raise ValueError("multiple windows match; narrow the target with --pid or --title")
+    return matches[0] if matches else None
 
 
 def capture(window, maxdepth=6):
     nodes = []
 
     def walk(ctrl, chain, depth):
-        if depth > maxdepth or len(nodes) > 400:
+        if depth > maxdepth or len(nodes) >= 400:
             return
         for child in ctrl.GetChildren():
+            if len(nodes) >= 400:
+                return
             name = child.Name or ""
             ct = child.ControlTypeName or ""
             pats = []
@@ -610,6 +626,7 @@ def resolve(window, path):
     parts = [p for p in path.split(" > ") if p]
     if not parts:
         return None
+    exact = []
     found = []
 
     def walk(ctrl, chain, depth):
@@ -618,17 +635,18 @@ def resolve(window, path):
         for child in ctrl.GetChildren():
             name = child.Name or ""
             ct = child.ControlTypeName or ""
-            full = chain + [name]
-            if (
-                name == parts[-1]
-                and " > ".join(full) == " > ".join(parts)
-                or " > ".join(full[-len(parts):]) == " > ".join(parts)
-            ):
+            full = chain + [name or ct]
+            if full == parts:
+                exact.append(child)
+            elif full[-len(parts):] == parts:
                 found.append(child)
             walk(child, chain + [name or ct], depth + 1)
 
     walk(window, [window.Name or "window"], 1)
-    return found[0] if found else None
+    matches = exact or found
+    if len(matches) > 1:
+        raise ValueError("ambiguous node path; use a unique full path from the live tree")
+    return matches[0] if matches else None
 
 
 def main():
@@ -642,7 +660,11 @@ def main():
     ap.add_argument("--allow-destructive", action="store_true")
     a = ap.parse_args()
 
-    window = find_window(a.process, a.title, a.pid)
+    try:
+        window = find_window(a.process, a.title, a.pid)
+    except ValueError as e:
+        print(json.dumps({"ok": False, "detail": str(e)}))
+        return 2
     if not window:
         print(json.dumps({"ok": False, "detail": "target window not found"}))
         return 2
@@ -663,7 +685,11 @@ def main():
     if DESTRUCTIVE_RE.search(path) and not a.allow_destructive:
         print(json.dumps({"ok": False, "detail": "destructive-looking path refused"}))
         return 2
-    node = resolve(window, path)
+    try:
+        node = resolve(window, path)
+    except ValueError as e:
+        print(json.dumps({"ok": False, "detail": str(e)}))
+        return 2
     if not node:
         print(json.dumps({"ok": False, "detail": "node not found: " + path}))
         return 2
@@ -711,23 +737,33 @@ def _uia_run(args: list[str]) -> dict:
     except (OSError, _sp.SubprocessError) as e:
         return {"ok": False, "detail": str(e)}
     try:
-        return json.loads(proc.stdout)
+        payload = json.loads(proc.stdout)
     except json.JSONDecodeError:
         return {"ok": False, "detail": (proc.stderr or proc.stdout)[:200]}
+    if not isinstance(payload, dict):
+        return {"ok": False, "detail": "UIA runner returned an invalid response"}
+    return payload
+
+
+def _uia_emit(ctx: click.Context, args: list[str]) -> None:
+    payload = _uia_run(args)
+    _emit(ctx, payload)
+    if not payload.get("ok"):
+        ctx.exit(2)
 
 
 @main.command("ui-tree")
 @click.pass_context
 def ui_tree(ctx: click.Context) -> None:
     """Dump the live UIA tree (read-only)."""
-    _emit(ctx, _uia_run(["tree"]))
+    _uia_emit(ctx, ["tree"])
 
 
 @main.command("ui-menus")
 @click.pass_context
 def ui_menus(ctx: click.Context) -> None:
     """List expandable menu paths (read-only)."""
-    _emit(ctx, _uia_run(["menus"]))
+    _uia_emit(ctx, ["menus"])
 
 
 @main.command("ui-invoke")
@@ -738,7 +774,7 @@ def ui_invoke(ctx: click.Context, path: str, yes: bool) -> None:
     """Invoke one UIA element. Requires --yes."""
     if not yes:
         _fail("refusing to drive the GUI without --yes")
-    _emit(ctx, _uia_run(["invoke", path, "--yes"]))
+    _uia_emit(ctx, ["invoke", path, "--yes"])
 
 
 @main.command("ui-select")
@@ -749,7 +785,7 @@ def ui_select(ctx: click.Context, path: str, yes: bool) -> None:
     """Select one UIA element (tab, list item). Requires --yes."""
     if not yes:
         _fail("refusing to drive the GUI without --yes")
-    _emit(ctx, _uia_run(["select", path, "--yes"]))
+    _uia_emit(ctx, ["select", path, "--yes"])
 
 
 @main.command("ui-set-text")
@@ -761,7 +797,7 @@ def ui_set_text(ctx: click.Context, path: str, text: str, yes: bool) -> None:
     """Set a UIA Value element's text. Requires --yes."""
     if not yes:
         _fail("refusing to drive the GUI without --yes")
-    _emit(ctx, _uia_run(["set-value", path, text, "--yes"]))
+    _uia_emit(ctx, ["set-value", path, text, "--yes"])
 '''
 
 UI_TESTS = '''
@@ -839,6 +875,7 @@ def write_report(report: GuiReport, scaffold_dir: str | Path) -> Path:
         found = next(root.rglob("agent-harness"), None)
         if found:
             root = found
+    root.mkdir(parents=True, exist_ok=True)
     p = root / "GUI-REPORT.md"
     p.write_text(report.markdown(), encoding="utf-8")
     (root / "gui.json").write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
