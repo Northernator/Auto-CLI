@@ -1,0 +1,97 @@
+{
+  "source": "Real Windows Notepad acceptance run",
+  "note": "Absolute checkout paths replaced with <repo>; install logs excluded. Commands retain captured arguments and outputs.",
+  "steps": [
+    {
+      "step": "generate",
+      "command": [
+        "-m",
+        "auto_cli",
+        "auto",
+        "--target",
+        "C:\\Windows\\System32\\notepad.exe",
+        "--name",
+        "notes",
+        "--out",
+        "<repo>\\.test-artifacts\\notepad-demo\\out",
+        "--gui-pid",
+        "4148",
+        "--repl-skin",
+        "<repo>\\.test-artifacts\\repl_skin.py",
+        "--timeout",
+        "60"
+      ],
+      "exit_code": 0,
+      "stdout": "[1/5] recon: C:\\Windows\\System32\\notepad.exe...\n      rea analyze...\n      flavor: unknown (unknown)\n[2/5] scaffold...\n      <repo>\\.test-artifacts\\notepad-demo\\out\\notes\\agent-harness\n[3/5] no --launch: static verify only...\n      verify: {}\n[4/5] completing domain surface...\n      table groups: (none)\n      endpoint commands: (none)\n[4b/5] GUI leg: driving UIA...\n      window: Untitled - Notepad | 23 nodes | 6 menu paths\n      scaffold upgraded: ui command group added\n[5/5] validate...\n      [PASS] file setup.py\n      [PASS] file cli_anything/notes/README.md\n      [PASS] file cli_anything/notes/__init__.py\n      [PASS] file cli_anything/notes/__main__.py\n      [PASS] file cli_anything/notes/skills/SKILL.md\n      [PASS] file cli_anything/notes/tests/__init__.py\n      [PASS] file cli_anything/notes/tests/test_core.py\n      [PASS] file cli_anything/notes/utils/repl_skin.py\n      [PASS] cli entry notes_cli.py\n      [PASS] all python compiles\n      [PASS] --json flag present\n      [PASS] has commands - 8 commands\n      [PASS] package imports\n      [PASS] repl_skin is a real copy\n      [PASS] registry-entry fields\n      [PASS] unit tests pass - 9 passed in 0.72s\n      result: OK\nresult: OK\nharness: <repo>\\.test-artifacts\\notepad-demo\\out\\notes\\agent-harness\n",
+      "stderr": ""
+    },
+    {
+      "step": "read-before",
+      "command": [
+        "-m",
+        "cli_anything.notes",
+        "--json",
+        "ui-read-text",
+        "Text Editor"
+      ],
+      "exit_code": 0,
+      "stdout": "{\n  \"ok\": true,\n  \"path\": \"Text Editor\",\n  \"text\": \"\"\n}\n",
+      "stderr": ""
+    },
+    {
+      "step": "gate",
+      "command": [
+        "-m",
+        "cli_anything.notes",
+        "--json",
+        "ui-set-text",
+        "Text Editor",
+        "This should be refused"
+      ],
+      "exit_code": 2,
+      "stdout": "",
+      "stderr": "error: refusing to drive the GUI without --yes\n"
+    },
+    {
+      "step": "write",
+      "command": [
+        "-m",
+        "cli_anything.notes",
+        "--json",
+        "ui-set-text",
+        "Text Editor",
+        "Release notes - Auto-CLI\r\n\r\n- Generate a CLI from app evidence.\r\n- Draft and verify notes in Windows Notepad.\r\n- Export the verified text to release-notes.txt.\r\n",
+        "--yes"
+      ],
+      "exit_code": 0,
+      "stdout": "{\n  \"ok\": true,\n  \"action\": \"set-value\",\n  \"path\": \"Text Editor\"\n}\n",
+      "stderr": ""
+    },
+    {
+      "step": "read-after",
+      "command": [
+        "-m",
+        "cli_anything.notes",
+        "--json",
+        "ui-read-text",
+        "Text Editor"
+      ],
+      "exit_code": 0,
+      "stdout": "{\n  \"ok\": true,\n  \"path\": \"Text Editor\",\n  \"text\": \"Release notes - Auto-CLI\\r\\n\\r\\n- Generate a CLI from app evidence.\\r\\n- Draft and verify notes in Windows Notepad.\\r\\n- Export the verified text to release-notes.txt.\\r\\n\"\n}\n",
+      "stderr": ""
+    },
+    {
+      "step": "validate",
+      "command": [
+        "-m",
+        "auto_cli",
+        "validate",
+        "--dir",
+        "<repo>\\.test-artifacts\\notepad-demo\\out\\notes\\agent-harness"
+      ],
+      "exit_code": 0,
+      "stdout": "[PASS] file setup.py\n[PASS] file cli_anything/notes/README.md\n[PASS] file cli_anything/notes/__init__.py\n[PASS] file cli_anything/notes/__main__.py\n[PASS] file cli_anything/notes/skills/SKILL.md\n[PASS] file cli_anything/notes/tests/__init__.py\n[PASS] file cli_anything/notes/tests/test_core.py\n[PASS] file cli_anything/notes/utils/repl_skin.py\n[PASS] cli entry notes_cli.py\n[PASS] all python compiles\n[PASS] --json flag present\n[PASS] has commands - 8 commands\n[PASS] package imports\n[PASS] repl_skin is a real copy\n[PASS] registry-entry fields\n[PASS] unit tests pass - 9 passed in 0.58s\nresult: OK\n",
+      "stderr": ""
+    }
+  ]
+}

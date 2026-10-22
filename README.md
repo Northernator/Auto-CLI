@@ -6,7 +6,7 @@
 
 ![Auto-CLI generates a Notepad CLI, writes release notes, and reads them back](docs/notepad-demo.gif)
 
-[Watch the MP4](docs/notepad-demo.mp4) · [Run the Notepad example](examples/notepad-demo.ps1)
+[Watch the MP4](docs/notepad-demo.mp4) · [Run the Notepad example](examples/notepad-demo.ps1) · [Demo source and evidence](videos/auto-cli-notepad/)
 
 This demo uses the real Windows Notepad: Auto-CLI generates a harness from
 recon and the live UI, then the generated commands write a release checklist,

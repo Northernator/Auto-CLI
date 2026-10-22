@@ -1,0 +1,13 @@
+{
+  "ok": true,
+  "app": "Windows Notepad",
+  "nodes": 23,
+  "written_text": "Release notes - Auto-CLI\r\n\r\n- Generate a CLI from app evidence.\r\n- Draft and verify notes in Windows Notepad.\r\n- Export the verified text to release-notes.txt.\r\n",
+  "read_back": {
+    "ok": true,
+    "path": "Text Editor",
+    "text": "Release notes - Auto-CLI\r\n\r\n- Generate a CLI from app evidence.\r\n- Draft and verify notes in Windows Notepad.\r\n- Export the verified text to release-notes.txt.\r\n"
+  },
+  "exported_file": "release-notes.txt",
+  "confirmation_gate_exit": 2
+}
