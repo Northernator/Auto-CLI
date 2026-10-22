@@ -13,6 +13,7 @@ Checks derived from CONTRIBUTING.md:
 from __future__ import annotations
 
 import json
+import os
 import py_compile
 import subprocess
 import sys
@@ -92,12 +93,14 @@ def validate(harness_dir: str | Path, python: str | None = None) -> ValidationRe
         target = root / rel
         report.checks.append(Check(f"file {rel}", target.exists()))
 
-    pkgs = [p for p in root.glob("cli_anything/*") if p.is_dir()]
+    pkgs = [p for p in root.glob("cli_anything/*") if p.is_dir() and p.name != "__pycache__"]
     if not pkgs:
         report.checks.append(Check("package layout", False, "no cli_anything/<module> found"))
         return report
     pkg = pkgs[0]
     module = pkg.name
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(root) + os.pathsep + env.get("PYTHONPATH", "")
 
     for rel in REQUIRED_PKG:
         target = pkg / rel
@@ -122,6 +125,19 @@ def validate(harness_dir: str | Path, python: str | None = None) -> ValidationRe
         )
         n_cmds = src.count("@main.command()")
         report.checks.append(Check("has commands", n_cmds > 0, f"{n_cmds} commands"))
+        try:
+            proc = subprocess.run(
+                [py, "-c", f"import importlib; importlib.import_module('cli_anything.{module}.{module}_cli')"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                cwd=root,
+                env=env,
+            )
+            detail = (proc.stderr or "").strip().splitlines()
+            report.checks.append(Check("package imports", proc.returncode == 0, detail[-1] if detail else ""))
+        except (OSError, subprocess.TimeoutExpired) as e:
+            report.checks.append(Check("package imports", False, str(e)))
 
     skin = pkg / "utils" / "repl_skin.py"
     if skin.exists():
@@ -149,19 +165,19 @@ def validate(harness_dir: str | Path, python: str | None = None) -> ValidationRe
 
     test_file = pkg / "tests" / "test_core.py"
     if test_file.exists():
-        import os
-
-        env = dict(os.environ)
-        env["PYTHONPATH"] = str(root) + os.pathsep + env.get("PYTHONPATH", "")
-        with tempfile.TemporaryDirectory() as td:
-            proc = subprocess.run(
-                [py, "-m", "pytest", str(test_file), "-q", "--no-header", "-p", "no:cacheprovider"],
-                capture_output=True,
-                text=True,
-                timeout=300,
-                cwd=td,
-                env=env,
-            )
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                proc = subprocess.run(
+                    [py, "-m", "pytest", str(test_file), "-q", "--no-header", "-p", "no:cacheprovider"],
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                    cwd=td,
+                    env=env,
+                )
+        except (OSError, subprocess.TimeoutExpired) as e:
+            report.checks.append(Check("unit tests pass", False, str(e)))
+            return report
         tail = (proc.stdout or "").strip().splitlines()
         last = tail[-1] if tail else (proc.stderr or "")[:200]
         report.checks.append(Check("unit tests pass", proc.returncode == 0, last))

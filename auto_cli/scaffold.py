@@ -37,6 +37,7 @@ import json
 import shutil
 import sqlite3
 import time
+from contextlib import closing
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -55,16 +56,26 @@ class BackendError(Exception):
 
 
 def resolve_db(override: str | None = None) -> Path:
+    if not override and not DEFAULT_DB:
+        raise BackendError("no database discovered; supply a database path")
     p = Path(override) if override else TARGET_ROOT / DEFAULT_DB
-    if not p.exists():
+    if not p.is_file():
         raise BackendError(f"database not found: {p}")
     return p
 
 
+def _read_only_db(path: Path):
+    # as_uri escapes URI delimiters such as # and ? in real Windows paths.
+    return sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+
+
+def _quote_ident(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
 def db_info(path: Path) -> dict:
     """Read-only overview. Never opens for write."""
-    uri = f"file:{path.as_posix()}?mode=ro"
-    con = sqlite3.connect(uri, uri=True)
+    con = _read_only_db(path)
     try:
         tables = [
             r[0]
@@ -74,7 +85,7 @@ def db_info(path: Path) -> dict:
         ]
         counts = {}
         for t in tables:
-            counts[t] = con.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
+            counts[t] = con.execute(f'SELECT COUNT(*) FROM {_quote_ident(t)}').fetchone()[0]
         return {
             "path": str(path),
             "size_bytes": path.stat().st_size,
@@ -86,14 +97,13 @@ def db_info(path: Path) -> dict:
 
 
 def db_schema(path: Path) -> dict:
-    uri = f"file:{path.as_posix()}?mode=ro"
-    con = sqlite3.connect(uri, uri=True)
+    con = _read_only_db(path)
     try:
         out = {}
         for (t,) in con.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
         ).fetchall():
-            cols = con.execute(f'PRAGMA table_info("{t}")').fetchall()
+            cols = con.execute(f'PRAGMA table_info({_quote_ident(t)})').fetchall()
             out[t] = [{"name": c[1], "type": c[2], "pk": bool(c[5])} for c in cols]
         return out
     finally:
@@ -108,7 +118,19 @@ def backup_db(path: Path, dest_dir: str | None = None) -> Path:
     candidate = dest / f"{path.stem}.backup-{stamp}{path.suffix}"
     if candidate.exists():
         raise BackendError(f"backup target exists: {candidate}")
-    shutil.copy2(path, candidate)
+    # Reserve the destination before using SQLite's backup API, which includes
+    # committed WAL data that a raw copy of the database file would miss.
+    try:
+        with candidate.open("xb"):
+            pass
+    except FileExistsError as e:
+        raise BackendError(f"backup target exists: {candidate}") from e
+    try:
+        with closing(_read_only_db(path)) as source, closing(sqlite3.connect(candidate)) as dest_db:
+            source.backup(dest_db)
+    except (sqlite3.Error, OSError):
+        candidate.unlink(missing_ok=True)
+        raise
     return candidate
 
 
@@ -121,8 +143,7 @@ def run_query(path: Path, sql: str, limit: int = 100) -> dict:
     if ";" in stripped:
         raise BackendError("multiple statements are not allowed")
     limit = max(1, min(int(limit), 10_000))
-    uri = f"file:{path.as_posix()}?mode=ro"
-    con = sqlite3.connect(uri, uri=True)
+    con = _read_only_db(path)
     try:
         cur = con.execute(stripped)
         rows = cur.fetchmany(limit + 1)
@@ -140,7 +161,12 @@ def export_table(path: Path, table: str, fmt: str, out: str) -> Path:
     schema = db_schema(path)
     if table not in schema:
         raise BackendError(f"unknown table: {table}")
-    data = run_query(path, f'SELECT * FROM "{table}"', limit=1_000_000)
+    con = _read_only_db(path)
+    try:
+        cur = con.execute(f'SELECT * FROM {_quote_ident(table)}')
+        data = {"columns": [d[0] for d in cur.description], "rows": cur.fetchall()}
+    finally:
+        con.close()
     dest = Path(out)
     if fmt == "json":
         dest.write_text(
@@ -194,12 +220,14 @@ import click
 from cli_anything.$module.core import backend
 
 
-def _emit(ctx, payload: dict) -> None:
+def _emit(ctx, payload) -> None:
     if ctx.obj and ctx.obj.get("json"):
         click.echo(json.dumps(payload, indent=2, default=str))
-    else:
+    elif isinstance(payload, dict):
         for k, v in payload.items():
             click.echo(f"{k}: {v}")
+    else:
+        click.echo(json.dumps(payload, indent=2, default=str))
 
 
 def _fail(msg: str) -> None:
@@ -223,7 +251,7 @@ def info(ctx: click.Context, db: str | None) -> None:
     """Read-only database overview."""
     try:
         _emit(ctx, backend.db_info(backend.resolve_db(db)))
-    except backend.BackendError as e:
+    except (backend.BackendError, backend.sqlite3.Error, OSError) as e:
         _fail(str(e))
 
 
@@ -234,7 +262,7 @@ def schema(ctx: click.Context, db: str | None) -> None:
     """Read-only table/column inventory."""
     try:
         _emit(ctx, backend.db_schema(backend.resolve_db(db)))
-    except backend.BackendError as e:
+    except (backend.BackendError, backend.sqlite3.Error, OSError) as e:
         _fail(str(e))
 
 
@@ -248,7 +276,7 @@ def backup(ctx: click.Context, db: str | None, dest: str | None) -> None:
         path = backend.resolve_db(db)
         out = backend.backup_db(path, dest)
         _emit(ctx, {"backup": str(out)})
-    except backend.BackendError as e:
+    except (backend.BackendError, backend.sqlite3.Error, OSError) as e:
         _fail(str(e))
 
 
@@ -261,7 +289,7 @@ def query(ctx: click.Context, sql: str, db: str | None, limit: int) -> None:
     """Read-only SELECT with row limit."""
     try:
         _emit(ctx, backend.run_query(backend.resolve_db(db), sql, limit))
-    except backend.BackendError as e:
+    except (backend.BackendError, backend.sqlite3.Error, OSError) as e:
         _fail(str(e))
 
 
@@ -276,7 +304,7 @@ def export_table(ctx: click.Context, table: str, out: str, fmt: str, db: str | N
     try:
         dest = backend.export_table(backend.resolve_db(db), table, fmt, out)
         _emit(ctx, {"exported": str(dest), "table": table, "format": fmt})
-    except backend.BackendError as e:
+    except (backend.BackendError, backend.sqlite3.Error, OSError) as e:
         _fail(str(e))
 
 
@@ -296,7 +324,7 @@ def get(ctx: click.Context, url: str, timeout: float) -> None:
     discovered during recon (ALLOWED_ORIGINS in core/backend.py)."""
     try:
         _emit(ctx, backend.http_get(url, timeout))
-    except backend.BackendError as e:
+    except (backend.BackendError, backend.sqlite3.Error, OSError) as e:
         _fail(str(e))
 
 
@@ -349,7 +377,7 @@ setup(
     install_requires=["click>=8.0.0", "prompt-toolkit>=3.0.0"],
     extras_require={"dev": ["pytest>=7.0.0"]},
     entry_points={"console_scripts": ["cli-anything-$name=cli_anything.$module.${module}_cli:main"]},
-    package_data={"cli_anything.$module": ["skills/*.md"]},
+    package_data={"cli_anything.$module": ["skills/*.md", "utils/*.mjs"]},
     include_package_data=True,
     zip_safe=False,
 )
@@ -559,6 +587,9 @@ def generate(
     name = name or re.sub(r"[^a-z0-9]+", "-", Path(plan.target).name.lower()).strip("-")
     display_name = display_name or Path(plan.target).name
     module = _module_name(name)
+    target = Path(target_root or plan.target).resolve()
+    if target.is_file():
+        target = target.parent
 
     dbs = [f.value for f in bundle.of_kind("database")]
     default_db = dbs[0] if dbs else ""
@@ -654,9 +685,7 @@ def generate(
     (pkg / "core" / "backend.py").write_text(
         BACKEND_PY.substitute(
             display_name=display_name,
-            target_root_repr=_py_repr(
-                str(Path(target_root).resolve()) if target_root else str(Path(plan.target).resolve())
-            ),
+            target_root_repr=_py_repr(str(target)),
             default_db_repr=_py_repr(default_db),
             ports_repr=_py_repr(ports),
             endpoints_repr=_py_repr(endpoints),

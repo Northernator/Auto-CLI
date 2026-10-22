@@ -32,8 +32,8 @@ INVENTORY_PROBES = [
     "JSON.stringify(Object.keys(globalThis).filter(k => /chan|ipc/i.test(k)))",
 ]
 SEND_PROBE_TEMPLATE = (
-    "JSON.stringify((globalThis.channels && channels.send) "
-    "? channels.send({channel!r}, {payload}) : null)"
+    "(async () => JSON.stringify((globalThis.channels && channels.send) "
+    "? await channels.send({channel}, {payload}) : null))()"
 )
 
 INSPECTOR_SEND_MJS = '''// Send one IPC-style channel message through a live V8 Inspector target.
@@ -70,13 +70,13 @@ async function main() {
   await new Promise((r) => (ws.onopen = r));
   await send("Runtime.enable", {});
   const expr =
-    "JSON.stringify((globalThis.channels && channels.send) " +
-    "? channels.send(" +
+    "(async () => { if (!(globalThis.channels && channels.send)) " +
+    "throw new Error('no channels.send in target'); return JSON.stringify(await channels.send(" +
     JSON.stringify(channel) +
     ", " +
     payload +
-    ") : {error: 'no channels.send in target'})";
-  const res = await send("Runtime.evaluate", { expression: expr, returnByValue: true });
+    ")); })()";
+  const res = await send("Runtime.evaluate", { expression: expr, returnByValue: true, awaitPromise: true });
   ws.close();
   const value = res.result && res.result.result && res.result.result.value;
   if (value === undefined) {
@@ -211,7 +211,7 @@ def _run_inspector_eval(inspector: str, expression: str, timeout: float = 15.0) 
         "ws.onmessage=m=>{const d=JSON.parse(m.data);if(d.id&&p.has(d.id)){p.get(d.id)(d);p.delete(d.id);}};"
         "const send=(method,params)=>new Promise(r=>{const i=++id;p.set(i,r);ws.send(JSON.stringify({id:i,method,params}));});"
         "await new Promise(r=>ws.onopen=r);await send('Runtime.enable',{});"
-        "const res=await send('Runtime.evaluate',{expression:expr,returnByValue:true});"
+        "const res=await send('Runtime.evaluate',{expression:expr,returnByValue:true,awaitPromise:true});"
         "ws.close();const v=res.result&&res.result.result&&res.result.result.value;"
         "console.log(v===undefined?'__ERROR__':v);})().catch(e=>{console.error(String(e));process.exit(1);});"
     )
@@ -221,6 +221,8 @@ def _run_inspector_eval(inspector: str, expression: str, timeout: float = 15.0) 
         text=True,
         timeout=timeout,
     )
+    if proc.returncode:
+        raise OSError((proc.stderr or proc.stdout or "inspector evaluation failed").strip()[:200])
     return (proc.stdout or "").strip()
 
 
@@ -308,13 +310,13 @@ def drive(
 
     # 3. Drive each channel and record the real response.
     for ch in targets:
-        expr = SEND_PROBE_TEMPLATE.format(channel=ch, payload="{}")
+        expr = SEND_PROBE_TEMPLATE.format(channel=json.dumps(ch), payload="{}")
         try:
             out = _run_inspector_eval(inspector, expr)
         except (subprocess.TimeoutExpired, OSError) as e:
             report.steps.append(DriveStep(name=f"send {ch}", ok=False, detail=str(e)[:120]))
             continue
-        if out and out != "__ERROR__":
+        if out and out not in ("__ERROR__", "null", "undefined"):
             report.live_channels[ch] = out
             report.steps.append(DriveStep(name=f"send {ch}", ok=True, response=out, detail=f"responded: {out[:80]}"))
         else:
@@ -330,7 +332,7 @@ def drive(
 def _upgrade_scaffold(root: Path, plan: surface.HarnessPlan, report: DriveReport) -> None:
     if not report.live_channels:
         return  # nothing confirmed live -> the scaffold stays honest
-    pkg = next(root.glob("cli_anything/*"), None)
+    pkg = next((p for p in root.glob("cli_anything/*") if (p / "core/backend.py").is_file()), None)
     if not pkg:
         return
     module = pkg.name
@@ -377,12 +379,15 @@ def send(ctx: click.Context, channel: str, message: str) -> None:
     except json.JSONDecodeError:
         _fail("--message must be valid JSON")
     script = _Path(__file__).parent / "utils" / "inspector_send.mjs"
-    proc = _sp.run(
-        ["node", str(script), backend.INSPECTOR_ENDPOINT, channel, json.dumps(payload)],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    try:
+        proc = _sp.run(
+            ["node", str(script), backend.INSPECTOR_ENDPOINT, channel, json.dumps(payload)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (_sp.TimeoutExpired, OSError) as e:
+        _fail("inspector send failed: %s" % e)
     if proc.returncode != 0:
         _fail("inspector send failed: %s" % (proc.stderr or proc.stdout)[:200])
     _emit(ctx, {"channel": channel, "response": proc.stdout.strip()})

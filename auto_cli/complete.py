@@ -14,7 +14,9 @@ Safety rules baked into every generated command:
 
 from __future__ import annotations
 
+import ast
 import json
+import keyword
 import re
 import sqlite3
 from dataclasses import dataclass, field
@@ -28,13 +30,6 @@ BACKEND_ADDITIONS = '''
 # ---- domain surface added by auto-cli complete ----------------------
 
 import re as _re
-
-
-def _quote_ident(name: str) -> str:
-    """SQLite identifier quoting. Rejects anything that is not a plain name."""
-    if not _re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
-        raise BackendError(f"unsafe identifier: {name!r}")
-    return '"' + name + '"'
 
 
 def table_columns(path: Path, table: str) -> list[dict]:
@@ -58,7 +53,7 @@ def table_list(path: Path, table: str, limit: int = 100, where: str | None = Non
 
 def table_get(path: Path, table: str, rowid: int) -> dict:
     t = _quote_ident(table)
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    con = _read_only_db(path)
     con.row_factory = sqlite3.Row
     try:
         rows = [dict(r) for r in con.execute(f"SELECT * FROM {t} WHERE rowid = ?", (rowid,))]
@@ -72,9 +67,9 @@ def table_get(path: Path, table: str, rowid: int) -> dict:
 def table_search(path: Path, table: str, term: str, limit: int = 50) -> dict:
     t = _quote_ident(table)
     cols = [c["name"] for c in table_columns(path, table)]
-    likes = " OR ".join(f'CAST("{c}" AS TEXT) LIKE ?' for c in cols)
+    likes = " OR ".join(f'CAST({_quote_ident(c)} AS TEXT) LIKE ?' for c in cols)
     sql = f"SELECT * FROM {t} WHERE {likes} LIMIT {max(1, min(int(limit), 1000))}"
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    con = _read_only_db(path)
     con.row_factory = sqlite3.Row
     try:
         rows = [dict(r) for r in con.execute(sql, (f"%{term}%",) * len(cols))]
@@ -84,6 +79,8 @@ def table_search(path: Path, table: str, term: str, limit: int = 50) -> dict:
 
 
 def _insert(path: Path, table: str, payload: dict, update: bool, rowid: int | None) -> dict:
+    if not isinstance(payload, dict):
+        raise BackendError("--payload must be a JSON object")
     cols = {c["name"] for c in table_columns(path, table)}
     unknown = sorted(set(payload) - cols)
     if unknown:
@@ -94,11 +91,15 @@ def _insert(path: Path, table: str, payload: dict, update: bool, rowid: int | No
         if update:
             if not payload:
                 raise BackendError("update needs at least one column")
-            sets = ", ".join(f'"{c}" = ?' for c in payload)
+            sets = ", ".join(f'{_quote_ident(c)} = ?' for c in payload)
             con.execute(f"UPDATE {t} SET {sets} WHERE rowid = ?", (*payload.values(), rowid))
             con.commit()
             return {"updated": rowid, "table": table}
-        keys = ", ".join(f'"{c}"' for c in payload)
+        if not payload:
+            cur = con.execute(f"INSERT INTO {t} DEFAULT VALUES")
+            con.commit()
+            return {"inserted": cur.lastrowid, "table": table}
+        keys = ", ".join(_quote_ident(c) for c in payload)
         marks = ", ".join("?" for _ in payload)
         cur = con.execute(f"INSERT INTO {t} ({keys}) VALUES ({marks})", tuple(payload.values()))
         con.commit()
@@ -128,10 +129,10 @@ def table_delete(path: Path, table: str, rowid: int) -> dict:
 
 GROUP_TEMPLATE = '''
 
-@main.group()
+@main.group({group_dash!r})
 @click.pass_context
 def {group}(ctx: click.Context) -> None:
-    """{table} table commands."""
+    """{group} table commands."""
 
 
 @{group}.command("list")
@@ -140,10 +141,10 @@ def {group}(ctx: click.Context) -> None:
 @click.argument("db", required=False)
 @click.pass_context
 def {group}_list(ctx: click.Context, limit: int, where: str | None, db: str | None) -> None:
-    """Read-only listing of {table}."""
+    """Read-only listing of {group}."""
     try:
-        _emit(ctx, backend.table_list(backend.resolve_db(db), "{table}", limit, where))
-    except backend.BackendError as e:
+        _emit(ctx, backend.table_list(backend.resolve_db(db), {table_repr}, limit, where))
+    except (backend.BackendError, backend.sqlite3.Error, OSError) as e:
         _fail(str(e))
 
 
@@ -152,10 +153,10 @@ def {group}_list(ctx: click.Context, limit: int, where: str | None, db: str | No
 @click.argument("db", required=False)
 @click.pass_context
 def {group}_get(ctx: click.Context, rowid: int, db: str | None) -> None:
-    """Read one {table} row by rowid."""
+    """Read one {group} row by rowid."""
     try:
-        _emit(ctx, backend.table_get(backend.resolve_db(db), "{table}", rowid))
-    except backend.BackendError as e:
+        _emit(ctx, backend.table_get(backend.resolve_db(db), {table_repr}, rowid))
+    except (backend.BackendError, backend.sqlite3.Error, OSError) as e:
         _fail(str(e))
 
 
@@ -165,10 +166,10 @@ def {group}_get(ctx: click.Context, rowid: int, db: str | None) -> None:
 @click.argument("db", required=False)
 @click.pass_context
 def {group}_search(ctx: click.Context, term: str, limit: int, db: str | None) -> None:
-    """Search {table} across all columns."""
+    """Search {group} across all columns."""
     try:
-        _emit(ctx, backend.table_search(backend.resolve_db(db), "{table}", term, limit))
-    except backend.BackendError as e:
+        _emit(ctx, backend.table_search(backend.resolve_db(db), {table_repr}, term, limit))
+    except (backend.BackendError, backend.sqlite3.Error, OSError) as e:
         _fail(str(e))
 
 
@@ -178,7 +179,7 @@ def {group}_search(ctx: click.Context, term: str, limit: int, db: str | None) ->
 @click.argument("db", required=False)
 @click.pass_context
 def {group}_add(ctx: click.Context, payload: str, yes: bool, db: str | None) -> None:
-    """Insert into {table}. Requires --yes; takes a backup first."""
+    """Insert into {group}. Requires --yes; takes a backup first."""
     if not yes:
         _fail("refusing to write without --yes (a backup is taken first)")
     try:
@@ -187,8 +188,8 @@ def {group}_add(ctx: click.Context, payload: str, yes: bool, db: str | None) -> 
         if not isinstance(data, dict):
             _fail("--payload must be a JSON object")
         out = backend.backup_db(path)
-        _emit(ctx, {{"backup": str(out), **backend.table_add(path, "{table}", data)}})
-    except backend.BackendError as e:
+        _emit(ctx, {{"backup": str(out), **backend.table_add(path, {table_repr}, data)}})
+    except (backend.BackendError, backend.sqlite3.Error, OSError) as e:
         _fail(str(e))
     except json.JSONDecodeError:
         _fail("--payload is not valid JSON")
@@ -201,15 +202,17 @@ def {group}_add(ctx: click.Context, payload: str, yes: bool, db: str | None) -> 
 @click.argument("db", required=False)
 @click.pass_context
 def {group}_update(ctx: click.Context, rowid: int, payload: str, yes: bool, db: str | None) -> None:
-    """Update one {table} row. Requires --yes; takes a backup first."""
+    """Update one {group} row. Requires --yes; takes a backup first."""
     if not yes:
         _fail("refusing to write without --yes (a backup is taken first)")
     try:
         path = backend.resolve_db(db)
         data = json.loads(payload)
+        if not isinstance(data, dict):
+            _fail("--payload must be a JSON object")
         out = backend.backup_db(path)
-        _emit(ctx, {{"backup": str(out), **backend.table_update(path, "{table}", rowid, data)}})
-    except backend.BackendError as e:
+        _emit(ctx, {{"backup": str(out), **backend.table_update(path, {table_repr}, rowid, data)}})
+    except (backend.BackendError, backend.sqlite3.Error, OSError) as e:
         _fail(str(e))
     except json.JSONDecodeError:
         _fail("--payload is not valid JSON")
@@ -221,14 +224,14 @@ def {group}_update(ctx: click.Context, rowid: int, payload: str, yes: bool, db: 
 @click.argument("db", required=False)
 @click.pass_context
 def {group}_delete(ctx: click.Context, rowid: int, yes: bool, db: str | None) -> None:
-    """Delete one {table} row. Requires --yes; takes a backup first."""
+    """Delete one {group} row. Requires --yes; takes a backup first."""
     if not yes:
         _fail("refusing to write without --yes (a backup is taken first)")
     try:
         path = backend.resolve_db(db)
         out = backend.backup_db(path)
-        _emit(ctx, {{"backup": str(out), **backend.table_delete(path, "{table}", rowid)}})
-    except backend.BackendError as e:
+        _emit(ctx, {{"backup": str(out), **backend.table_delete(path, {table_repr}, rowid)}})
+    except (backend.BackendError, backend.sqlite3.Error, OSError) as e:
         _fail(str(e))
 '''
 
@@ -249,7 +252,7 @@ def {fn}(ctx: click.Context, timeout: float) -> None:
             _emit(ctx, _json.loads(data["body"]))
         except _json.JSONDecodeError:
             _emit(ctx, {{"raw": data["body"][:2000]}})
-    except backend.BackendError as e:
+    except (backend.BackendError, backend.sqlite3.Error, OSError) as e:
         _fail(str(e))
 '''
 
@@ -279,61 +282,51 @@ def {fn}(ctx: click.Context, payload: str, timeout: float) -> None:
 
 DOMAIN_TESTS = '''
 
-def test_{group}_list_reads_real_schema():
-    """list/search/get run against the verified schema - no app needed."""
-    import sqlite3
+def test_{group}_list_routes_to_verified_table(monkeypatch, tmp_path):
+    """Domain commands route to the verified table without requiring the app."""
+    from click.testing import CliRunner
+    from cli_anything.{module} import {module}_cli
     from cli_anything.{module}.core import backend
 
-    tmp = backend.resolve_db()
-    con = sqlite3.connect(f"file:{{tmp}}?mode=ro", uri=True)
-    tables = [
-        r[0]
-        for r in con.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-        )
-    ]
-    con.close()
-    assert "{table}" in tables
-    res = backend.table_list(tmp, "{table}", limit=5)
-    assert "rows" in res
+    path = tmp_path / "fixture.db"
+    monkeypatch.setattr(backend, "resolve_db", lambda override=None: path)
+    calls = []
+    monkeypatch.setattr(
+        backend, "table_list",
+        lambda *args: calls.append(args) or {{"columns": [], "rows": []}},
+    )
+    res = CliRunner().invoke({module}_cli.main, ["{group_dash}", "list", "--limit", "5"])
+    assert res.exit_code == 0, res.output
+    assert calls == [(path, {table_repr}, 5, None)]
 
 
 def test_{group}_write_requires_yes_and_backs_up(monkeypatch, tmp_path):
     """Writes are refused without --yes, and a backup precedes every write."""
     import json
-    import shutil
-    import sqlite3
     from click.testing import CliRunner
     from cli_anything.{module} import {module}_cli
     from cli_anything.{module}.core import backend
 
     db = tmp_path / "w.db"
-    shutil.copy(backend.resolve_db(), db)
     monkeypatch.setattr(backend, "resolve_db", lambda override=None: db)
-    backups = []
-    monkeypatch.setattr(backend, "backup_db", lambda p, d=None: backups.append(str(p)) or p)
-
-    # schema-aware payload: first writable column, whatever the table has
-    cols = [c["name"] for c in backend.table_columns(db, "{table}") if not c["pk"]]
-    if not cols:
-        return
-    col = cols[0]
-    payload = json.dumps({{col: "forge-test"}})
+    events = []
+    monkeypatch.setattr(backend, "backup_db", lambda p, d=None: events.append("backup") or p)
+    monkeypatch.setattr(
+        backend, "table_add",
+        lambda p, table, data: events.append(("write", table, data)) or {{"inserted": 1}},
+    )
+    payload = json.dumps({{"fixture": "forge-test"}})
 
     runner = CliRunner()
     res = runner.invoke({module}_cli.main, ["{group_dash}", "add", "--payload", payload])
     assert res.exit_code == 2  # no --yes -> refused
+    assert events == []
 
     res = runner.invoke(
         {module}_cli.main, ["{group_dash}", "add", "--payload", payload, "--yes"]
     )
     assert res.exit_code == 0, res.output
-    assert backups, "write happened without a backup"
-    con = sqlite3.connect(db)
-    q = 'SELECT COUNT(*) FROM "' + "{table}" + '" WHERE "' + col + '" = ?'
-    n = con.execute(q, ("forge-test",)).fetchone()[0]
-    con.close()
-    assert n == 1
+    assert events == ["backup", ("write", {table_repr}, {{"fixture": "forge-test"}})]
 '''
 
 GENERIC_NAMES = {
@@ -358,6 +351,7 @@ GENERIC_NAMES = {
 @dataclass
 class CompletionReport:
     tables: list[str] = field(default_factory=list)
+    table_commands: dict[str, str] = field(default_factory=dict)
     endpoint_commands: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
 
@@ -374,7 +368,7 @@ def _db_tables(target: str, default_db: str) -> list[str]:
     if not p or not p.exists():
         return []
     try:
-        con = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+        con = sqlite3.connect(p.resolve().as_uri() + "?mode=ro", uri=True)
         tables = [
             r[0]
             for r in con.execute(
@@ -412,7 +406,7 @@ def complete(
         found = next(root.rglob("agent-harness"), None)
         if found:
             root = found
-    pkg = next(root.glob("cli_anything/*"), None)
+    pkg = next((p for p in root.glob("cli_anything/*") if (p / "core/backend.py").is_file()), None)
     if not pkg:
         return CompletionReport(skipped=["no package found"])
     module = pkg.name
@@ -426,32 +420,45 @@ def complete(
         backend_file.write_text(src, encoding="utf-8")
 
     default_db = ""
-    m = re.search(r"DEFAULT_DB = ['\"]([^'\"]*)['\"]", src)
-    if m:
-        default_db = m.group(1)
-    tables = _db_tables(plan.target, default_db)
+    target_root = plan.target
+    # Read Python literals, including escaped backslashes/quotes in Windows
+    # paths. A regex over repr() leaves those escape sequences in the path.
+    for node in ast.parse(src).body:
+        if not isinstance(node, ast.Assign):
+            continue
+        names = [n.id for n in node.targets if isinstance(n, ast.Name)]
+        if "DEFAULT_DB" in names:
+            default_db = ast.literal_eval(node.value)
+        elif "TARGET_ROOT" in names and isinstance(node.value, ast.Call) and node.value.args:
+            target_root = ast.literal_eval(node.value.args[0])
+    tables = _db_tables(target_root, default_db)
 
     cli_file = pkg / f"{module}_cli.py"
     cli_src = cli_file.read_text(encoding="utf-8")
 
     for table in tables:
-        group = table if re.fullmatch(r"[a-z][a-z0-9_]*", table) else f"{table}_rows"
+        group = re.sub(r"[^a-z0-9_]+", "_", table.lower()).strip("_") or "table"
+        if group[0].isdigit() or keyword.iskeyword(group):
+            group = "table_" + group
+        # An existing generated table group makes completion idempotent.
+        if f"backend.table_list(backend.resolve_db(db), {table!r}," in cli_src:
+            continue
         # only a REAL collision with the generated CLI matters
-        if f"def {group}(" in cli_src or f"def {group}_" in cli_src:
-            report.skipped.append(f"table {table} (name collision with {group})")
-            continue
-        if f"def {group}_list" in cli_src:
-            continue
+        while f"def {group}(" in cli_src or f"def {group}_" in cli_src:
+            group += "_rows"
+        group_dash = group.replace("_", "-")
         cli_src = cli_src.replace(
             '\n\nif __name__ == "__main__":',
-            GROUP_TEMPLATE.format(group=group, table=table) + '\n\nif __name__ == "__main__":',
+            GROUP_TEMPLATE.format(group=group, group_dash=group_dash, table_repr=repr(table))
+            + '\n\nif __name__ == "__main__":',
         )
         report.tables.append(table)
+        report.table_commands[table] = group_dash
 
         # per-table tests
         tests_file = pkg / "tests" / "test_core.py"
         tsrc = tests_file.read_text(encoding="utf-8")
-        tsrc += DOMAIN_TESTS.format(group=group, group_dash=group.replace("_", "-"), table=table, module=module)
+        tsrc += DOMAIN_TESTS.format(group=group, group_dash=group_dash, table_repr=repr(table), module=module)
         tests_file.write_text(tsrc, encoding="utf-8")
 
     # ---- endpoint domain surface (verified endpoints only)
@@ -501,7 +508,7 @@ def _update_skill(pkg: Path, plan: HarnessPlan, report: CompletionReport) -> Non
     cli_name = "cli-anything-" + pkg.name.replace("_", "-")
     lines = ["", "## Generated domain surface", ""]
     for t in report.tables:
-        tcmd = t.replace("_", "-")  # click renders underscores as dashes
+        tcmd = report.table_commands[t]
         lines.append(f"### {t}")
         lines.append("```bash")
         lines.append(f"{cli_name} {tcmd} list [--limit N] [--where 'bpm > 120']")

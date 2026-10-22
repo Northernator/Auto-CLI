@@ -1,7 +1,11 @@
 """Tests for evidence-driven completion (complete command)."""
 
 import json
+import importlib.util
+import os
 import sqlite3
+import subprocess
+import sys
 
 import pytest
 
@@ -101,6 +105,74 @@ def test_skill_documents_surface(tmp_path, built):
 def test_endpoint_command_name():
     assert cmp_mod._endpoint_command_name("http://127.0.0.1:18110/api/library/tracks") == "library-tracks"
     assert cmp_mod._endpoint_command_name("http://127.0.0.1:18110/") == "root"
+
+
+def test_completion_decodes_paths_and_handles_sqlite_names(tmp_path):
+    target = tmp_path / "target #1"
+    db = target / "data" / "library's.db"
+    db.parent.mkdir(parents=True)
+    with sqlite3.connect(db) as con:
+        con.executescript('''
+            CREATE TABLE "track-list" (id INTEGER PRIMARY KEY, title TEXT NOT NULL, artist TEXT NOT NULL);
+            CREATE TABLE info (id INTEGER PRIMARY KEY);
+            CREATE TABLE class (id INTEGER PRIMARY KEY);
+            CREATE TABLE "123notes" (id INTEGER PRIMARY KEY);
+            CREATE TABLE "odd""table" ("song""title" TEXT);
+            INSERT INTO "odd""table" VALUES ('hello');
+        ''')
+    con.close()
+    bundle = ev.EvidenceBundle(target="not-the-database-root", findings=[
+        ev.Finding(kind="database", value=str(db.relative_to(target)), source_command="local-fs")
+    ])
+    plan = surface.classify(bundle)
+    root = scaffold.generate(plan, bundle, tmp_path / "out", name="done-app", target_root=target)
+    report = cmp_mod.complete(bundle, plan, root)
+    assert set(report.tables) == {"track-list", "info", "class", "123notes", 'odd"table'}
+    assert report.table_commands["info"] == "info-rows"
+    assert report.table_commands["class"] == "table-class"
+    backend_path = root / "cli_anything/done_app/core/backend.py"
+    spec = importlib.util.spec_from_file_location("completed_backend", backend_path)
+    backend = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(backend)
+    assert backend.table_search(db, 'odd"table', "hello")["matches"] == [{'song"title': "hello"}]
+    backend.table_add(db, 'odd"table', {'song"title': "new"})
+    assert len(backend.table_list(db, 'odd"table')["rows"]) == 2
+    with pytest.raises(backend.BackendError, match="JSON object"):
+        backend.table_update(db, 'odd"table', 1, [])
+    # Generated unit tests remain runnable after the target app is unavailable.
+    db.rename(db.with_suffix(".unavailable"))
+    env = dict(os.environ, PYTHONPATH=str(root))
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", str(root / "cli_anything/done_app/tests/test_core.py"), "-q"],
+        capture_output=True, text=True, timeout=60, env=env,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_generated_update_rejects_non_object_before_backup(built):
+    bundle, plan, root = built
+    cmp_mod.complete(bundle, plan, root)
+    proc = subprocess.run(
+        [sys.executable, "-m", "cli_anything.done_app", "tracks", "update", "1", "--payload", "[]", "--yes"],
+        capture_output=True, text=True, timeout=30,
+        env=dict(os.environ, PYTHONPATH=str(root)),
+    )
+    assert proc.returncode == 2
+    assert "JSON object" in proc.stderr
+    assert not list((root / "..").rglob("*.backup-*"))
+
+
+def test_generated_database_failure_is_a_cli_error(built):
+    bundle, plan, root = built
+    cmp_mod.complete(bundle, plan, root)
+    proc = subprocess.run(
+        [sys.executable, "-m", "cli_anything.done_app", "tracks", "add", "--payload", '{"unknown": 1}', "--yes"],
+        capture_output=True, text=True, timeout=30,
+        env=dict(os.environ, PYTHONPATH=str(root)),
+    )
+    assert proc.returncode == 2
+    assert "unknown columns" in proc.stderr
+    assert "Traceback" not in proc.stderr
 
 
 def tmpdir():
