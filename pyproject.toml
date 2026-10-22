@@ -7,6 +7,10 @@ name = "auto-cli"
 version = "0.1.0"
 description = "REA recon in, CLI-Anything harness out: reverse-engineer an app's automation surface, then forge a registry-ready CLI harness"
 requires-python = ">=3.10"
+license = { text = "MIT" }
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+]
 dependencies = []
 
 [project.optional-dependencies]
