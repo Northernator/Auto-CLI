@@ -2,6 +2,22 @@
 
 **Point it at software. Get an agent-native CLI.**
 
+> **Windows-first.** Live GUI testing has covered Windows Notepad and Calculator. The core unit suite also runs on Linux; broader app and platform coverage is still limited. Issues and PRs welcome.
+
+### Getting started (3 steps)
+1. Install Git, Python 3.10+ and Node.js (22.19+, 24.11+ or 26+), then `npm i -g rea-agents`.
+2. `pip install "git+https://github.com/Northernator/Auto-CLI.git@main" pytest click prompt-toolkit`
+3. Fetch CLI-Anything's repl skin, check REA, and generate:
+   ```powershell
+   Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/HKUDS/CLI-Anything/main/rms/agent-harness/cli_anything/rms/utils/repl_skin.py' -OutFile repl_skin.py
+   python -m auto_cli doctor
+   python -m auto_cli auto --target <app-or-folder> --name <name> --out out --repl-skin repl_skin.py
+   ```
+
+For a reproducible first example, paste the [full copy-and-paste quickstart](#copy-and-paste-quickstart-windows-powershell): it builds a small SQLite library app, generates its CLI, and exports a CSV.
+
+*Auto-CLI is an independent project. It is not affiliated with [REA](https://github.com/morluto/rea) or [CLI-Anything](https://github.com/HKUDS/CLI-Anything); it uses REA's recon and outputs harnesses in CLI-Anything's layout.*
+
 ## A real Windows app, driven by its generated CLI
 
 ![Auto-CLI generates a Notepad CLI, writes release notes, and reads them back](docs/notepad-demo.gif)
