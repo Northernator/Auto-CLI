@@ -14,7 +14,7 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0.0"]
+dev = ["pytest>=7.0.0", "click", "prompt-toolkit"]
 gui = ["uiautomation>=2.0"]
 
 [project.scripts]
