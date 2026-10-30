@@ -87,6 +87,7 @@ class GuiReport:
     process: str
     pid: int = 0
     window: str = ""
+    executable: str = ""
     nodes: list[UiNode] = field(default_factory=list)
     actions: list[GuiAction] = field(default_factory=list)
     limitations: list[str] = field(default_factory=list)
@@ -96,6 +97,7 @@ class GuiReport:
             "process": self.process,
             "pid": self.pid,
             "window": self.window,
+            "executable": self.executable,
             "nodes": [n.to_dict() for n in self.nodes],
             "actions": [a.to_dict() for a in self.actions],
             "limitations": self.limitations,
@@ -138,10 +140,11 @@ def find_window(
     pid: int | None = None,
     process: str | None = None,
     title_contains: str | None = None,
+    executable: str | None = None,
 ):
     """Find one top-level window matching every supplied selector."""
     _require_uia()
-    if not any((pid, process, title_contains)):
+    if not any((pid, process, title_contains, executable)):
         return None
     matches = []
     for w in auto.GetRootControl().GetChildren():
@@ -150,6 +153,8 @@ def find_window(
         if process and (w.ClassName or "").lower() != process.lower():
             continue
         if title_contains and title_contains.lower() not in (w.Name or "").lower():
+            continue
+        if executable and _executable_key(window_executable(w.ProcessId)) != _executable_key(executable):
             continue
         matches.append(w)
     if len(matches) > 1:
@@ -169,7 +174,7 @@ def find_window_by_handle(window_id: int):
     return None
 
 
-def capture_tree(window, maxdepth: int = 6, maxnodes: int = 400) -> list[UiNode]:
+def capture_tree(window, maxdepth: int = 12, maxnodes: int = 400) -> list[UiNode]:
     """Walk the control view into normalized nodes with pattern capabilities."""
     _require_uia()
     nodes: list[UiNode] = []
@@ -184,7 +189,7 @@ def capture_tree(window, maxdepth: int = 6, maxnodes: int = 400) -> list[UiNode]
             name = child.Name or ""
             ct = child.ControlTypeName or ""
             pats = []
-            for pname in ("Invoke", "Value", "ExpandCollapse", "SelectionItem", "Toggle"):
+            for pname in ("Invoke", "Value", "Text", "ExpandCollapse", "SelectionItem", "Toggle"):
                 try:
                     if getattr(child, f"Get{pname}Pattern", lambda: None)():
                         pats.append(pname)
@@ -228,7 +233,7 @@ def _find_node(window, path: str):
     found = []
 
     def walk(ctrl, chain: list[str], depth: int) -> None:
-        if depth > 8:
+        if depth > 12:
             return
         for child in ctrl.GetChildren():
             name = child.Name or ""
@@ -254,6 +259,26 @@ def screenshot(window, out_path: str | Path) -> str:
         return str(out_path)
     except Exception as e:  # pragma: no cover
         return f"screenshot failed: {e}"
+
+
+def read_text(node) -> str:
+    """Read a document without invoking or changing its control."""
+    errors = []
+    for pattern_name in ("Value", "Text"):
+        try:
+            pattern = getattr(node, f"Get{pattern_name}Pattern", lambda: None)()
+            if pattern is None:
+                continue
+            text = pattern.Value if pattern_name == "Value" else pattern.DocumentRange.GetText(-1)
+            if not isinstance(text, str):
+                raise TypeError("text pattern returned a non-string value")
+            return text
+        except Exception as e:
+            errors.append(f"{pattern_name}: {type(e).__name__}: {e}")
+    detail = "control does not expose readable Value or Text patterns"
+    if errors:
+        detail += "; " + "; ".join(errors)
+    raise GuiError(detail)
 
 
 def act(
@@ -359,8 +384,8 @@ def window_executable(pid: int) -> str:
         if not handle:
             return ""
         try:
-            buf = ctypes.create_unicode_buffer(1024)
-            size = wintypes.DWORD(1024)
+            buf = ctypes.create_unicode_buffer(32768)
+            size = wintypes.DWORD(len(buf))
             if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
                 return buf.value
         finally:
@@ -368,6 +393,13 @@ def window_executable(pid: int) -> str:
     except Exception:
         pass
     return ""
+
+
+def _executable_key(path: str) -> str:
+    # Use Windows path semantics even when generating/testing on another OS.
+    import ntpath
+
+    return ntpath.normcase(ntpath.abspath(path)) if path else ""
 
 
 def _rea_nodes_to_ui(
@@ -550,21 +582,21 @@ def act_via_rea(
 UIA_RUNNER_PY = '''#!/usr/bin/env python3
 """Self-contained UIA runner for this harness.
 
-Subcommands: tree | menus | read-text <path> | invoke <path> | select <path> | set-value <path> <text>
-Finds the target window by process class or title. Every driving action
+Subcommands: info | tree | menus | read-text <path> | invoke <path> | select <path> | set-value <path> <text>
+Finds the target window by executable, process class and optional PID/title. Every driving action
 requires --yes. Requires: pip install uiautomation
 """
 
 import argparse
 import json
+import ntpath
 import re
 import sys
 
 try:
     import uiautomation as auto
 except ImportError:
-    print(json.dumps({"ok": False, "detail": "pip install uiautomation"}))
-    sys.exit(3)
+    auto = None
 
 DESTRUCTIVE_RE = re.compile(
     r"save|close|delete|remove|exit|quit|format|discard|overwrite|replace",
@@ -572,8 +604,43 @@ DESTRUCTIVE_RE = re.compile(
 )
 
 
-def find_window(process=None, title=None, pid=None):
-    if not any((process, title, pid)):
+def window_executable(pid):
+    import ctypes
+    from ctypes import wintypes
+
+    try:
+        kernel32 = ctypes.windll.kernel32
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.QueryFullProcessImageNameW.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)
+        ]
+        kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return ""
+        try:
+            buf = ctypes.create_unicode_buffer(32768)
+            size = wintypes.DWORD(len(buf))
+            if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                return buf.value
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        pass
+    return ""
+
+
+def _executable_key(path):
+    return ntpath.normcase(ntpath.abspath(path)) if path else ""
+
+
+def find_window(process=None, title=None, pid=None, executable=None):
+    if auto is None:
+        raise ValueError("uiautomation unavailable; install this harness on Windows with its GUI dependency")
+    if not any((process, title, pid, executable)):
         return None
     matches = []
     for w in auto.GetRootControl().GetChildren():
@@ -583,25 +650,27 @@ def find_window(process=None, title=None, pid=None):
             continue
         if title and title.lower() not in (w.Name or "").lower():
             continue
+        if executable and _executable_key(window_executable(w.ProcessId)) != _executable_key(executable):
+            continue
         matches.append(w)
     if len(matches) > 1:
         raise ValueError("multiple windows match; narrow the target with --pid or --title")
     return matches[0] if matches else None
 
 
-def capture(window, maxdepth=6):
+def capture(window, maxdepth=12, maxnodes=400):
     nodes = []
 
     def walk(ctrl, chain, depth):
-        if depth > maxdepth or len(nodes) >= 400:
+        if depth > maxdepth or len(nodes) >= maxnodes:
             return
         for child in ctrl.GetChildren():
-            if len(nodes) >= 400:
+            if len(nodes) >= maxnodes:
                 return
             name = child.Name or ""
             ct = child.ControlTypeName or ""
             pats = []
-            for pname in ("Invoke", "Value", "ExpandCollapse", "SelectionItem", "Toggle"):
+            for pname in ("Invoke", "Value", "Text", "ExpandCollapse", "SelectionItem", "Toggle"):
                 try:
                     if getattr(child, f"Get{pname}Pattern", lambda: None)():
                         pats.append(pname)
@@ -630,7 +699,7 @@ def resolve(window, path):
     found = []
 
     def walk(ctrl, chain, depth):
-        if depth > 8:
+        if depth > 12:
             return
         for child in ctrl.GetChildren():
             name = child.Name or ""
@@ -668,50 +737,70 @@ def read_text(node):
     raise ValueError(detail)
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("cmd")
+class JsonArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        raise ValueError(message)
+
+
+def fail(code, detail):
+    print(json.dumps({"ok": False, "error": code, "detail": detail}, ensure_ascii=False))
+    return 2
+
+
+def _main():
+    ap = JsonArgumentParser()
+    ap.add_argument("cmd", choices=("info", "tree", "menus", "read-text", "invoke", "select", "set-value"))
     ap.add_argument("args", nargs="*")
     ap.add_argument("--process", default=None)
     ap.add_argument("--title", default=None)
     ap.add_argument("--pid", type=int, default=None)
+    ap.add_argument("--executable", default=None)
+    ap.add_argument("--max-depth", type=int, default=12)
+    ap.add_argument("--max-nodes", type=int, default=400)
     ap.add_argument("--yes", action="store_true")
     ap.add_argument("--allow-destructive", action="store_true")
     a = ap.parse_args()
+    if a.pid is not None and a.pid <= 0:
+        return fail("invalid_input", "--pid must be positive")
+    if not 1 <= a.max_depth <= 64 or not 1 <= a.max_nodes <= 10000:
+        return fail("invalid_input", "--max-depth must be 1..64 and --max-nodes must be 1..10000")
+    expected_args = 2 if a.cmd == "set-value" else (1 if a.cmd in ("read-text", "invoke", "select") else 0)
+    if len(a.args) != expected_args:
+        return fail("invalid_input", f"{a.cmd} expects {expected_args} argument(s)")
+    if a.cmd in ("invoke", "select", "set-value") and not a.yes:
+        return fail("approval_required", "driving requires --yes")
 
     try:
-        window = find_window(a.process, a.title, a.pid)
+        window = find_window(a.process, a.title, a.pid, a.executable)
     except ValueError as e:
-        print(json.dumps({"ok": False, "detail": str(e)}))
-        return 2
+        return fail("ambiguous_target" if "multiple windows" in str(e) else "target_unavailable", str(e))
     if not window:
-        print(json.dumps({"ok": False, "detail": "target window not found"}))
-        return 2
+        return fail("missing_target", "target window not found")
 
+    if a.cmd == "info":
+        print(json.dumps({"ok": True, "window": window.Name, "pid": window.ProcessId,
+                          "class": window.ClassName, "executable": window_executable(window.ProcessId),
+                          "runtime": "windows-uia"}, ensure_ascii=False))
+        return 0
     if a.cmd == "tree":
-        print(json.dumps({"ok": True, "window": window.Name, "nodes": capture(window)}))
+        print(json.dumps({"ok": True, "window": window.Name,
+                          "nodes": capture(window, a.max_depth, a.max_nodes)}, ensure_ascii=False))
         return 0
     if a.cmd == "menus":
-        nodes = capture(window)
+        nodes = capture(window, a.max_depth, a.max_nodes)
         menus = [n["path"] for n in nodes if "ExpandCollapse" in n["patterns"]]
         print(json.dumps({"ok": True, "menus": menus}))
         return 0
 
-    if a.cmd != "read-text" and not a.yes:
-        print(json.dumps({"ok": False, "detail": "driving requires --yes"}))
-        return 2
     path = a.args[0] if a.args else ""
     if a.cmd != "read-text" and DESTRUCTIVE_RE.search(path) and not a.allow_destructive:
-        print(json.dumps({"ok": False, "detail": "destructive-looking path refused"}))
-        return 2
+        return fail("destructive_path", "destructive-looking path refused; use --allow-destructive with --yes")
     try:
         node = resolve(window, path)
     except Exception as e:
-        print(json.dumps({"ok": False, "detail": str(e)}))
-        return 2
+        return fail("ambiguous_control", str(e))
     if not node:
-        print(json.dumps({"ok": False, "detail": "node not found: " + path}))
-        return 2
+        return fail("missing_control", "node not found: " + path)
     try:
         if a.cmd == "read-text":
             print(json.dumps({"ok": True, "path": path, "text": read_text(node)}))
@@ -723,13 +812,20 @@ def main():
         elif a.cmd == "set-value":
             node.GetValuePattern().SetValue(a.args[1] if len(a.args) > 1 else "")
         else:
-            print(json.dumps({"ok": False, "detail": "unknown cmd"}))
-            return 2
+            return fail("invalid_input", "unknown cmd")
     except Exception as e:
-        print(json.dumps({"ok": False, "detail": f"{type(e).__name__}: {e}"}))
-        return 2
+        return fail("uia_failure", f"{type(e).__name__}: {e}")
     print(json.dumps({"ok": True, "action": a.cmd, "path": path}))
     return 0
+
+
+def main():
+    try:
+        return _main()
+    except ValueError as e:
+        return fail("invalid_input", str(e))
+    except Exception as e:
+        return fail("uia_failure", f"{type(e).__name__}: {e}")
 
 
 if __name__ == "__main__":
@@ -742,22 +838,36 @@ UI_CLI_TEMPLATE = '''
 
 import subprocess as _sp
 import sys as _sys
+import os as _os
 
 
-def _uia_run(args: list[str]) -> dict:
-    """Shell out to the harness's own UIA runner with the same safety gates."""
+def _uia_run(args: list[str], *, pid=None, title=None, yes=False,
+             allow_destructive=False, max_depth=None, max_nodes=None) -> dict:
+    """Keep trusted options separate from literal control paths and text."""
     from pathlib import Path as _Path
 
+    if args and args[0] in ("invoke", "select", "set-value") and not yes:
+        return {"ok": False, "error": "approval_required", "detail": "driving requires --yes"}
     runner = _Path(__file__).parent / "utils" / "uia_runner.py"
-    cmd = [_sys.executable, str(runner), *args]
-    if backend.TARGET_WINDOW_PROCESS:
-        cmd += ["--process", backend.TARGET_WINDOW_PROCESS]
-    if backend.TARGET_WINDOW_TITLE:
-        cmd += ["--title", backend.TARGET_WINDOW_TITLE]
-    if getattr(backend, "TARGET_WINDOW_PID", 0):
-        cmd += ["--pid", str(backend.TARGET_WINDOW_PID)]
+    cmd = [_sys.executable, str(runner)]
+    if getattr(backend, "TARGET_WINDOW_PROCESS", ""):
+        cmd += ["--process=" + backend.TARGET_WINDOW_PROCESS]
+    if getattr(backend, "TARGET_WINDOW_EXECUTABLE", ""):
+        cmd += ["--executable=" + backend.TARGET_WINDOW_EXECUTABLE]
+    elif pid is None and title is None:
+        return {"ok": False, "error": "target_identity_missing",
+                "detail": "captured executable unavailable; supply --pid or --title to select the target explicitly"}
+    for option, value in (("pid", pid), ("title", title), ("max-depth", max_depth), ("max-nodes", max_nodes)):
+        if value is not None:
+            cmd += ["--" + option + "=" + str(value)]
+    if yes:
+        cmd += ["--yes"]
+    if allow_destructive:
+        cmd += ["--allow-destructive"]
+    cmd += ["--", *args]
     try:
-        proc = _sp.run(cmd, capture_output=True, text=True, timeout=60)
+        proc = _sp.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=60,
+                       env={**_os.environ, "PYTHONIOENCODING": "utf-8"})
     except (OSError, _sp.SubprocessError) as e:
         return {"ok": False, "detail": str(e)}
     try:
@@ -766,70 +876,92 @@ def _uia_run(args: list[str]) -> dict:
         return {"ok": False, "detail": (proc.stderr or proc.stdout)[:200]}
     if not isinstance(payload, dict):
         return {"ok": False, "detail": "UIA runner returned an invalid response"}
+    if getattr(proc, "returncode", 0) and payload.get("ok"):
+        return {"ok": False, "error": "runner_failure", "detail": "UIA runner exited " + str(proc.returncode)}
     return payload
 
 
-def _uia_emit(ctx: click.Context, args: list[str]) -> None:
-    payload = _uia_run(args)
+def _ui_target_options(function):
+    function = click.option("--title", help="match the current window title (substring)")(function)
+    return click.option("--pid", type=click.IntRange(min=1), help="target a current process ID")(function)
+
+
+def _uia_emit(ctx: click.Context, args: list[str], pid=None, title=None, **options) -> None:
+    payload = _uia_run(args, pid=pid, title=title, **options)
     _emit(ctx, payload)
     if not payload.get("ok"):
         ctx.exit(2)
 
 
 @main.command("ui-tree")
+@_ui_target_options
+@click.option("--max-depth", type=click.IntRange(1, 64), default=12, show_default=True)
+@click.option("--max-nodes", type=click.IntRange(1, 10000), default=400, show_default=True)
 @click.pass_context
-def ui_tree(ctx: click.Context) -> None:
+def ui_tree(ctx: click.Context, pid, title, max_depth, max_nodes) -> None:
     """Dump the live UIA tree (read-only)."""
-    _uia_emit(ctx, ["tree"])
+    _uia_emit(ctx, ["tree"], pid, title, max_depth=max_depth, max_nodes=max_nodes)
 
 
 @main.command("ui-menus")
+@_ui_target_options
+@click.option("--max-depth", type=click.IntRange(1, 64), default=12, show_default=True)
+@click.option("--max-nodes", type=click.IntRange(1, 10000), default=400, show_default=True)
 @click.pass_context
-def ui_menus(ctx: click.Context) -> None:
+def ui_menus(ctx: click.Context, pid, title, max_depth, max_nodes) -> None:
     """List expandable menu paths (read-only)."""
-    _uia_emit(ctx, ["menus"])
+    _uia_emit(ctx, ["menus"], pid, title, max_depth=max_depth, max_nodes=max_nodes)
+
+
+@main.command("ui-info")
+@_ui_target_options
+@click.pass_context
+def ui_info(ctx: click.Context, pid, title) -> None:
+    """Report the current live window and its executable (read-only)."""
+    _uia_emit(ctx, ["info"], pid, title)
 
 
 @main.command("ui-read-text")
 @click.argument("path")
+@_ui_target_options
 @click.pass_context
-def ui_read_text(ctx: click.Context, path: str) -> None:
+def ui_read_text(ctx: click.Context, path: str, pid, title) -> None:
     """Read a UIA Value or Text element's contents (read-only)."""
-    _uia_emit(ctx, ["read-text", path])
+    _uia_emit(ctx, ["read-text", path], pid, title)
 
 
 @main.command("ui-invoke")
 @click.argument("path")
 @click.option("--yes", is_flag=True, help="confirm the action")
+@click.option("--allow-destructive", is_flag=True, help="allow a save/close/delete-like control path")
+@_ui_target_options
 @click.pass_context
-def ui_invoke(ctx: click.Context, path: str, yes: bool) -> None:
+def ui_invoke(ctx: click.Context, path: str, yes: bool, allow_destructive: bool, pid, title) -> None:
     """Invoke one UIA element. Requires --yes."""
-    if not yes:
-        _fail("refusing to drive the GUI without --yes")
-    _uia_emit(ctx, ["invoke", path, "--yes"])
+    _uia_emit(ctx, ["invoke", path], pid, title, yes=yes, allow_destructive=allow_destructive)
 
 
 @main.command("ui-select")
 @click.argument("path")
 @click.option("--yes", is_flag=True, help="confirm the action")
+@click.option("--allow-destructive", is_flag=True, help="allow a save/close/delete-like control path")
+@_ui_target_options
 @click.pass_context
-def ui_select(ctx: click.Context, path: str, yes: bool) -> None:
+def ui_select(ctx: click.Context, path: str, yes: bool, allow_destructive: bool, pid, title) -> None:
     """Select one UIA element (tab, list item). Requires --yes."""
-    if not yes:
-        _fail("refusing to drive the GUI without --yes")
-    _uia_emit(ctx, ["select", path, "--yes"])
+    _uia_emit(ctx, ["select", path], pid, title, yes=yes, allow_destructive=allow_destructive)
 
 
 @main.command("ui-set-text")
 @click.argument("path")
 @click.argument("text")
 @click.option("--yes", is_flag=True, help="confirm the action")
+@click.option("--allow-destructive", is_flag=True, help="allow a save/close/delete-like control path")
+@_ui_target_options
 @click.pass_context
-def ui_set_text(ctx: click.Context, path: str, text: str, yes: bool) -> None:
+def ui_set_text(ctx: click.Context, path: str, text: str, yes: bool, allow_destructive: bool, pid, title) -> None:
     """Set a UIA Value element's text. Requires --yes."""
-    if not yes:
-        _fail("refusing to drive the GUI without --yes")
-    _uia_emit(ctx, ["set-value", path, text, "--yes"])
+    _uia_emit(ctx, ["set-value", path, text], pid, title, yes=yes, allow_destructive=allow_destructive)
 '''
 
 UI_TESTS = '''
@@ -839,7 +971,7 @@ def test_ui_commands_exist():
     from cli_anything.{module} import {module}_cli
 
     names = {{c.name for c in {module}_cli.main.commands.values()}}
-    assert {{"ui-tree", "ui-menus", "ui-read-text", "ui-invoke", "ui-select", "ui-set-text"}} <= names
+    assert {{"ui-info", "ui-tree", "ui-menus", "ui-read-text", "ui-invoke", "ui-select", "ui-set-text"}} <= names
 '''
 
 
@@ -856,6 +988,16 @@ def upgrade_scaffold(root: Path, report: GuiReport) -> bool:
     anchor = '\n\nif __name__ == "__main__":'
     if anchor not in src:
         return False
+    setup = root / "setup.py"
+    setup_src = setup.read_text(encoding="utf-8")
+    requirements = 'install_requires=["click>=8.0.0", "prompt-toolkit>=3.0.0"],'
+    if requirements not in setup_src:
+        raise GuiError("cannot declare the generated GUI dependency: unexpected setup.py requirements")
+    setup.write_text(setup_src.replace(
+        requirements,
+        'install_requires=["click>=8.0.0", "prompt-toolkit>=3.0.0", "uiautomation>=2.0.20; sys_platform == \'win32\'"],',
+        1,
+    ), encoding="utf-8")
     src = src.replace(anchor, UI_CLI_TEMPLATE + anchor)
     cli_file.write_text(src, encoding="utf-8")
 
@@ -871,6 +1013,7 @@ def upgrade_scaffold(root: Path, report: GuiReport) -> bool:
         f"TARGET_WINDOW_PROCESS = {report.process!r}\n"
         f"TARGET_WINDOW_TITLE = {report.window!r}\n"
         f"TARGET_WINDOW_PID = {report.pid!r}\n"
+        f"TARGET_WINDOW_EXECUTABLE = {(report.executable or window_executable(report.pid))!r}\n"
         "ALLOWED_ORIGINS = ",
         1,
     )
@@ -888,15 +1031,21 @@ def upgrade_scaffold(root: Path, report: GuiReport) -> bool:
         "## Rules for agents",
         "## GUI surface (driven via UIA, see GUI-REPORT.md)\n\n"
         "Read-only:\n\n```bash\n"
+        f"{'cli-anything-' + module.replace('_', '-')} ui-info\n"
         f"{'cli-anything-' + module.replace('_', '-')} ui-tree\n"
         f"{'cli-anything-' + module.replace('_', '-')} ui-menus\n"
         f"{'cli-anything-' + module.replace('_', '-')} ui-read-text \"<path>\"\n"
         "```\n\n"
+        "Commands resolve the current window by captured executable and class; captured PID/title are evidence only. "
+        "Every ui command accepts `--pid` and `--title` to narrow multiple open windows. "
+        "If the executable was unavailable during capture, an explicit selector is required. "
+        "`ui-tree` and `ui-menus` accept `--max-depth` (default 12) and `--max-nodes` (default 400).\n\n"
         "Driving (all require --yes):\n\n```bash\n"
         f"{'cli-anything-' + module.replace('_', '-')} ui-invoke \"<path>\" --yes\n"
         f"{'cli-anything-' + module.replace('_', '-')} ui-select \"<path>\" --yes\n"
         f"{'cli-anything-' + module.replace('_', '-')} ui-set-text \"<path>\" \"text\" --yes\n"
         "```\n\n"
+        "Save/close/delete-like paths also require `--allow-destructive`.\n\n"
         "Discovered menu paths:\n\n" + menus + "\n\n## Rules for agents",
     )
     skill.write_text(text, encoding="utf-8")

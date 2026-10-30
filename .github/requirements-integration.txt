@@ -1,0 +1,3 @@
+# Test-only applications; these are not auto-cli runtime dependencies.
+datasette==0.65.5
+sqlite-utils==4.2.1
