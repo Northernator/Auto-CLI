@@ -22,7 +22,9 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 from . import evidence as ev
@@ -457,14 +459,27 @@ def cmd_auto(args) -> int:
     inspector = args.inspector
     if args.launch:
         print(f"[3/5] launching app: {args.launch}...", flush=True)
-        proc = drv.launch(args.launch, cwd=args.cwd)
+        try:
+            if args.launch is True:
+                if args.url or not Path(target).is_file():
+                    print("--launch without a command requires an executable --target", file=sys.stderr)
+                    return 2
+                proc = subprocess.Popen(
+                    [target], cwd=args.cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+            else:
+                proc = drv.launch(args.launch, cwd=args.cwd)
+        except OSError as exc:
+            print(f"launch failed: {exc}", file=sys.stderr)
+            return 2
         if not inspector:
-            m = re.search(r"--inspect(?:-brk)?[= ](\d+)", args.launch)
+            m = re.search(r"--inspect(?:-brk)?[= ](\d+)", str(args.launch))
             inspector = f"http://127.0.0.1:{m.group(1)}" if m else None
     else:
         print("[3/5] no --launch: static verify only...", flush=True)
 
     verification = None
+    vrep = vfy.VerificationReport(target=plan.target)
     try:
         if inspector:
             if not drv.wait_for_inspector(inspector, timeout_s=args.wait):
@@ -485,42 +500,68 @@ def cmd_auto(args) -> int:
             vfy.write_report(vrep, root)
             verification = vrep.to_dict()
             print(f"      verify: {vrep.counts}")
+        # Keep an owned launch alive through GUI capture and the optional agent.
+        return _finish_auto(args, bundle, plan, root, vrep, proc)
     finally:
         if proc:
             proc.terminate()
 
-    # 3. complete: generate the domain surface from verified evidence
+
+def _finish_auto(args, bundle, plan, root, vrep, proc=None) -> int:
+    """Complete a harness while a target launched by auto is still running."""
+    gui_report = None
+    gui_failed = False
+    gui_requested = bool(args.gui_process or args.gui_pid or args.gui_title) or (
+        os.name == "nt" and args.launch is True and Path(bundle.target).suffix.lower() == ".exe"
+    )
+    if gui_requested:
+        print("[3b/5] GUI leg: verifying the live UIA surface...", flush=True)
+        try:
+            process = args.gui_process or ("WordPadClass" if Path(bundle.target).name.lower() == "wordpad.exe" else None)
+            # Direct executable launches expose the application's PID. Shell
+            # launches may expose a wrapper PID, so bind those by executable.
+            pid = args.gui_pid or (proc.pid if proc and args.launch is True else None)
+            deadline = time.monotonic() + (args.wait if args.launch else 0)
+            while True:
+                window = gui_mod.find_window(
+                    pid=pid, process=process, title_contains=args.gui_title, executable=bundle.target,
+                )
+                if window or time.monotonic() >= deadline:
+                    break
+                time.sleep(0.2)
+            if window:
+                gui_report = gui_mod.GuiReport(
+                    process=window.ClassName or "",
+                    pid=window.ProcessId,
+                    window=window.Name or "",
+                    executable=gui_mod.window_executable(window.ProcessId),
+                )
+                vfy.verify_gui(bundle, vrep, window, gui_report=gui_report)
+                gui_mod.write_report(gui_report, root)
+                menus = gui_mod.menu_paths(gui_report.nodes)
+                print(f"      window: {gui_report.window} | {len(gui_report.nodes)} nodes | {len(menus)} menu paths")
+                gui_failed = not any(c.kind == "gui_window" and c.state == "verified" for c in vrep.checks)
+            else:
+                print("      GUI window not found", file=sys.stderr)
+                vrep.checks.append(vfy.Verification("gui_window", bundle.target, "failed", "GUI window not found"))
+                gui_failed = True
+        except gui_mod.GuiError as e:
+            print(f"      GUI leg skipped: {e}", file=sys.stderr)
+            vrep.checks.append(vfy.Verification("gui_window", bundle.target, "failed", str(e)))
+            gui_failed = True
+        vfy.write_report(vrep, root)
+
+    verification = vrep.to_dict()
     print("[4/5] completing domain surface...", flush=True)
     creport = cmp_mod.complete(bundle, plan, root, verification)
     for line in creport.lines():
         print("      " + line)
-
-    # 3b. GUI leg: drive the UIA surface and add the ui command group
-    gui_failed = False
-    if args.gui_process or args.gui_pid or args.gui_title:
-        print("[4b/5] GUI leg: driving UIA...", flush=True)
-        try:
-            window = gui_mod.find_window(
-                pid=args.gui_pid, process=args.gui_process, title_contains=args.gui_title
-            )
-            if window:
-                grep = gui_mod.GuiReport(
-                    process=window.ClassName or "",
-                    pid=window.ProcessId,
-                    window=window.Name or "",
-                )
-                grep.nodes = gui_mod.capture_tree(window)
-                gui_mod.write_report(grep, root)
-                menus = gui_mod.menu_paths(grep.nodes)
-                print(f"      window: {grep.window} | {len(grep.nodes)} nodes | {len(menus)} menu paths")
-                if gui_mod.upgrade_scaffold(root, grep):
-                    print("      scaffold upgraded: ui command group added")
-            else:
-                print("      GUI window not found", file=sys.stderr)
-                gui_failed = True
-        except gui_mod.GuiError as e:
-            print(f"      GUI leg skipped: {e}", file=sys.stderr)
-            gui_failed = True
+    if gui_report and not gui_failed:
+        if gui_mod.upgrade_scaffold(root, gui_report):
+            print("      scaffold upgraded: ui command group added")
+        from . import document
+        if document.upgrade_scaffold(root, gui_report, executable=bundle.target):
+            print("      scaffold upgraded: document workflow commands added")
 
     # 4. validate (one repair pass if tests fail)
     print("[5/5] validate...", flush=True)
@@ -646,7 +687,8 @@ def _cmd_gui_local(args) -> int:
         return 1
 
     report = gui_mod.GuiReport(
-        process=window.ClassName or "", pid=window.ProcessId, window=window.Name or ""
+        process=window.ClassName or "", pid=window.ProcessId, window=window.Name or "",
+        executable=gui_mod.window_executable(window.ProcessId),
     )
     report.nodes = gui_mod.capture_tree(window, maxdepth=args.depth)
     print(f"window: {report.window} (pid {report.pid}, {len(report.nodes)} nodes)")
@@ -683,6 +725,10 @@ def _cmd_gui_local(args) -> int:
     print(f"report: {out}")
     if args.dir and gui_mod.upgrade_scaffold(Path(args.dir), report):
         print("scaffold upgraded: ui command group added")
+    if args.dir and report.executable:
+        from . import document
+        if document.upgrade_scaffold(Path(args.dir), report, executable=report.executable):
+            print("scaffold upgraded: document workflow commands added")
     return 0 if all(action.ok for action in report.actions) else 2
 
 
@@ -701,7 +747,10 @@ def _cmd_gui_via_rea(args, rea, window_id: int, pid: int) -> int:
         return _cmd_gui_local(args)
 
     window_name = nodes[0].path.split(" > ")[0] if nodes else "window"
-    report = gui_mod.GuiReport(process=args.process or "", pid=pid, window=window_name)
+    report = gui_mod.GuiReport(
+        process=args.process or "", pid=pid, window=window_name,
+        executable=gui_mod.window_executable(pid),
+    )
     report.nodes = nodes
     report.limitations.append("captured through REA's native-windows provider (rea-windows)")
     print(f"window: {window_name} (pid {pid}, {len(report.nodes)} nodes)")
@@ -747,6 +796,10 @@ def _cmd_gui_via_rea(args, rea, window_id: int, pid: int) -> int:
     print(f"report: {out}")
     if args.dir and gui_mod.upgrade_scaffold(Path(args.dir), report):
         print("scaffold upgraded: ui command group added")
+    if args.dir and report.executable:
+        from . import document
+        if document.upgrade_scaffold(Path(args.dir), report, executable=report.executable):
+            print("scaffold upgraded: document workflow commands added")
     return 0 if all(action.ok for action in report.actions) else 2
 
 
@@ -761,6 +814,25 @@ def cmd_verify(args) -> int:
     bundle = _load_bundle(args.bundle)
     plan = surface.classify(bundle)
     report = vfy.verify(bundle, plan, args.dir, timeout=args.timeout)
+    gui_failed = False
+    if args.gui_process or args.gui_pid or args.gui_title:
+        try:
+            window = gui_mod.find_window(
+                pid=args.gui_pid, process=args.gui_process, title_contains=args.gui_title,
+                executable=bundle.target,
+            )
+            if window is None:
+                raise gui_mod.GuiError("GUI window not found for the evidence target")
+            gui_report = gui_mod.GuiReport(
+                process=window.ClassName or "", pid=window.ProcessId, window=window.Name or "",
+                executable=gui_mod.window_executable(window.ProcessId),
+            )
+            vfy.verify_gui(bundle, report, window, gui_report=gui_report)
+            gui_mod.write_report(gui_report, args.dir)
+            gui_failed = not vfy.verified_gui_surface(report.to_dict(), bundle.target)
+        except gui_mod.GuiError as exc:
+            report.checks.append(vfy.Verification("gui_window", bundle.target, "failed", str(exc)))
+            gui_failed = True
     out = vfy.write_report(report, args.dir)
     for c in report.checks:
         print(f"[{c.state:<13}] {c.kind}: {c.target[:60]} - {c.detail[:70]}")
@@ -768,7 +840,7 @@ def cmd_verify(args) -> int:
     print(f"report: {out}")
     if report.patches:
         print(f"patched constants: {list(report.patches)}")
-    return 0
+    return 2 if gui_failed else 0
 
 
 def cmd_drive(args) -> int:
@@ -877,6 +949,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--bundle", required=True, help="evidence-bundle.json from probe/pipeline")
     sp.add_argument("--dir", required=True, help="generated scaffold dir (agent-harness)")
     sp.add_argument("--timeout", type=float, default=5.0)
+    sp.add_argument("--gui-process", default=None, help="verify a live GUI window ClassName")
+    sp.add_argument("--gui-pid", type=int, default=None)
+    sp.add_argument("--gui-title", default=None, help="verify a live GUI window title substring")
 
     sp = sub.add_parser(
         "complete",
@@ -908,7 +983,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--wait-ms", type=int, default=2000, dest="wait_ms")
     sp.add_argument("--wait", type=float, default=25.0, help="seconds to wait for a launched app")
     sp.add_argument("--inspector", default=None)
-    sp.add_argument("--launch", default=None, help='command that starts the app, e.g. "node --inspect=9229 app.js"')
+    sp.add_argument("--launch", nargs="?", const=True, default=None, help='launch --target directly, or supply a command such as "node --inspect=9229 app.js"')
     sp.add_argument("--cwd", default=None)
     sp.add_argument("--observe-ms", type=int, default=1500, dest="observe_ms")
     sp.add_argument("--probe", action="append")
@@ -955,7 +1030,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--set-text", action="append", help="path=value to set (requires --yes)")
     sp.add_argument("--yes", action="store_true", help="confirm driving actions")
     sp.add_argument("--allow-destructive", action="store_true")
-    sp.add_argument("--depth", type=int, default=6)
+    sp.add_argument("--depth", type=int, default=12)
     sp.add_argument("--dir", default=None, help="scaffold dir to upgrade with the ui group")
     sp.add_argument("--out", default="forge-gui")
 
@@ -964,6 +1039,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    repl_skin = getattr(args, "repl_skin", None)
+    if repl_skin is not None and not Path(repl_skin).is_file():
+        print(f"REPL skin file not found: {repl_skin}", file=sys.stderr)
+        return 2
     return {
         "doctor": cmd_doctor,
         "probe": cmd_probe,

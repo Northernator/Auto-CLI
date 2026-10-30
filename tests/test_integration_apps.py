@@ -129,7 +129,9 @@ def test_sqlite_utils_recon_to_generated_workflow(rea, workspace):
 
     payload = json.dumps({"id": 3, "title": "From the generated harness"})
     denied = _cli(harness, "sqlite_app", "tracks", "add", "--payload", payload, expected=2)
-    assert "without --yes" in denied.stderr
+    refusal = json.loads(denied.stdout)
+    assert refusal["ok"] is False and "without --yes" in refusal["error"]["message"]
+    assert not denied.stderr
     assert not list(workspace.glob("*.backup-*.db"))
     inserted = _cli(harness, "sqlite_app", "tracks", "add", "--payload", payload, "--yes")
     assert inserted["inserted"] == 3

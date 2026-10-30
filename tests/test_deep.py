@@ -4,11 +4,12 @@ import json
 import subprocess
 import sys
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from auto_cli import deep, evidence, scaffold, surface, validate
+from auto_cli import deep, evidence, gui, scaffold, surface, validate, verify
 
 
 @pytest.fixture()
@@ -103,6 +104,33 @@ def test_corrected_runtime_evidence_is_accepted(built):
     assert "Use verified_value for corrected findings" in (report.run_dir / "prompt.md").read_text()
 
 
+def test_gui_only_live_read_evidence_unlocks_handoff(built, monkeypatch):
+    bundle, root, _ = built
+    Path(bundle.target).write_bytes(b"executable fixture")
+    window = SimpleNamespace(ProcessId=42, NativeWindowHandle=123, ClassName="WordPadClass")
+    monkeypatch.setattr(gui, "window_executable", lambda pid: bundle.target)
+    monkeypatch.setattr(gui, "capture_tree", lambda window: [gui.UiNode("document", "DocumentControl", "document", ["Text"], 1)])
+    monkeypatch.setattr(gui, "_find_node", lambda window, path: object())
+    monkeypatch.setattr(gui, "read_text", lambda node: "fixture content")
+    verification = verify.verify_gui(bundle, verify.VerificationReport(bundle.target), window)
+    verify.write_report(verification, root)
+    report = deep.generate(bundle, root, agent="codex", prepare_only=True)
+    assert report.ok
+    prompt = (report.run_dir / "prompt.md").read_text()
+    assert "document titles are observations, not defaults" in prompt
+    assert ".workflow-check" in prompt and "disposable fixtures" in prompt
+    assert "do not prove editing, formatting, saving" in prompt
+
+
+def test_static_gui_report_or_unbound_check_cannot_unlock_handoff(built):
+    bundle, root, verification = built
+    verification["checks"] = [{"kind": "gui_window", "target": bundle.target, "state": "verified"}]
+    (root / "verification.json").write_text(json.dumps(verification), encoding="utf-8")
+    (root / "gui.json").write_text(json.dumps({"window": "WordPad", "nodes": [{"patterns": ["Text"]}]}), encoding="utf-8")
+    with pytest.raises(ValueError, match="no verified/corrected"):
+        deep.generate(bundle, root, agent="codex", prepare_only=True)
+
+
 @pytest.mark.parametrize("change", ["missing", "mismatched", "failed", "unverifiable", "empty", "malformed"])
 def test_requires_runtime_verification_before_preparing(built, monkeypatch, change):
     bundle, root, verification = built
@@ -163,6 +191,8 @@ def test_success_requires_validation_and_uses_stdin(built, monkeypatch):
     assert (report.run_dir / "agent.stdout.log").read_text() == "Implemented workflows\n"
     assert (report.run_dir / "agent.stderr.log").read_text() == "agent diagnostic\n"
     assert json.loads((report.run_dir / "validation.json").read_text())["ok"] is True
+    assert json.loads((report.run_dir / "validation.json").read_text())["live_workflow_verified"] is False
+    assert "does not certify a live application workflow" in (root / "DEEP-REPORT.md").read_text()
     assert json.loads((report.run_dir / "report.json").read_text())["status"] == "completed"
 
 
