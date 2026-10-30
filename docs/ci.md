@@ -23,14 +23,12 @@ other combinations. The integration job has no `continue-on-error` or automatic
 capability skips. Repository branch-protection requirements are configured
 separately from this workflow.
 
-For a dated local reference, the Windows validation on **30 October 2026** with
-Python 3.11.9 and Node.js 24.22.1 reported **164 passed, 1 skipped** with the two
-real-app tests enabled using REA 6.8.0. The ordinary invocation with integrations
-disabled reported **162 passed, 3 skipped**: the two opt-in integrations and one
-generated-runner entry-point case. These are historical local results; use the
-run for the commit under review for current hosted evidence. Counts can change
-as tests are added. Installing `wheel` ensures the generated-wheel test runs
-instead of contributing an additional skip.
+Test counts change as cases are added. Use the run for the commit under review
+and inspect `-rs`/JUnit output for the skipped cases. The two server/database
+integrations are enabled in their dedicated job; the live WordPad integration
+is opt-in on an interactive Windows desktop and is not enabled on hosted CI.
+Installing `wheel` ensures the generated-wheel test runs rather than adding
+another skip.
 
 ## Real-app coverage and its limits
 
@@ -50,8 +48,16 @@ exercise these application workflows:
 The application tests do not mock REA outputs, HTTP responses, or subprocesses.
 The Datasette client is a fixture: this covers endpoint discovery and a working
 server connection, rather than reverse engineering Datasette's implementation
-or browser UI. Desktop GUI automation and arbitrary third-party applications
-remain outside this automated coverage.
+or browser UI. Live desktop GUI automation and arbitrary third-party
+applications remain outside hosted CI coverage. The separate opt-in WordPad
+integration below exercises a real native document round trip on Windows.
+
+Unit regressions additionally cover fresh GUI target resolution after a
+process restart or document-title change, executable/class scoping, ambiguous
+window rejection, public target selectors, mutation guards and successful
+approved controls. They use fake UIA objects and do not replace the live test.
+Generated-package checks cover the bundled original REPL skin and its license,
+database-free target information, and JSON error responses.
 
 The database test also covers a bug found during real Windows testing: REA can
 report `library.db` before the absolute local-filesystem finding. For a direct
@@ -117,7 +123,8 @@ python -m pip install -e ".[dev]" "setuptools>=68" wheel
 python -m pytest -q -rs --junitxml=test-results/unit.xml
 ```
 
-For that ordinary invocation, leave `AUTO_CLI_REAL_APPS` unset. Setuptools and
+For that ordinary invocation, leave `AUTO_CLI_REAL_APPS` and `AUTO_CLI_WORDPAD`
+unset. Setuptools and
 wheel support the generated-package regression; these are development tools,
 not added auto-cli runtime dependencies. Reproduce package-building failures
 with:
@@ -201,6 +208,59 @@ causing cleanup to fail even after analysis produces a complete evidence
 envelope. A wider display preserves the identity check; it does not disable
 cleanup verification or accept a nonzero REA exit status. The Bash override is
 confined to the subshell.
+
+## Run the live WordPad integration
+
+[test_wordpad_integration.py](../tests/test_wordpad_integration.py) is a
+separate opt-in test for an interactive Windows desktop with native English
+WordPad installed. It requires actual REA via `REA_BIN`, a supported Node.js
+runtime, the GUI extra, and the development/package dependencies above.
+Close existing WordPad windows first; the test skips when it cannot obtain an
+isolated target or visible desktop. An alternate installed executable can be
+selected with `AUTO_CLI_WORDPAD_EXE`.
+It is not run in the hosted matrix and does not substitute mocked UIA objects
+for the real document editor.
+
+From the activated environment, set `REA_BIN` to your installed REA entry
+point and run:
+
+```powershell
+python -m pip install -e ".[dev,gui]" "setuptools>=68" wheel
+$env:REA_BIN = 'C:\path\to\rea\scripts\rea.mjs'
+$previousWordPad = $env:AUTO_CLI_WORDPAD
+$previousArtifacts = $env:AUTO_CLI_TEST_ARTIFACTS
+$wordpadEvidence = Join-Path $env:TEMP ('auto-cli-wordpad-' + [guid]::NewGuid().ToString('N'))
+try {
+    $env:AUTO_CLI_WORDPAD = '1'
+    $env:AUTO_CLI_TEST_ARTIFACTS = $wordpadEvidence
+    python -m pytest -q -rs tests/test_wordpad_integration.py
+    if ($LASTEXITCODE -ne 0) { throw 'WordPad integration failed; inspect the retained test evidence' }
+} finally {
+    $env:AUTO_CLI_WORDPAD = $previousWordPad
+    $env:AUTO_CLI_TEST_ARTIFACTS = $previousArtifacts
+    Write-Output "WordPad evidence: $wordpadEvidence"
+}
+```
+
+The test targets the recognized native WordPad adapter: generation with a
+direct `--launch`, package installation, and document operations through the
+generated CLI. It repeats the workflow with fresh inputs/output paths, checks
+denied writes, malformed input and overwrite refusal, and tests public GUI
+retargeting after the generation session has closed. The composed workflow
+edits a private RTF copy, performs the
+app's Save As, reopens the output, checks text and bold formatting, and checks
+that the source stayed unchanged. See [Windows workflows](windows-workflows.md)
+for manual commands and evidence locations. No separate `AUTO_CLI_REPL_SKIN`
+or downloaded skin is needed; generation uses the bundled original and license.
+Command logs, exit status, elapsed time, generated packages, input/output
+documents, verification and workflow records remain under a unique `wordpad-*`
+directory in the evidence location. Without `AUTO_CLI_TEST_ARTIFACTS`, pytest's
+temporary directory is used instead.
+
+Leave `AUTO_CLI_WORDPAD` unset for ordinary development runs. Enabling a test
+is not itself evidence that it passed; retain its result and reports for the
+exact target version and commit. Package/unit validation and live document
+verification are reported separately.
 
 ## Investigate a failure and rerun
 

@@ -43,14 +43,16 @@ python -m auto_cli doctor
 ```
 
 Standalone `deep` loads the saved evidence bundle and harness. It does not
-locate or run REA and can prepare context offline from those saved files.
+locate or run REA. GUI handoffs also check the recorded executable against
+the current file on disk, which must still be present and unchanged.
 
-Supply CLI-Anything's actual `repl_skin.py` when generating a harness. The
-placeholder intentionally fails validation. This download command works in
-both PowerShell and Bash and uses Python's standard library:
+Generation includes an unmodified, pinned copy of CLI-Anything's original
+`repl_skin.py` and its Apache 2.0 license. No separate download or checkout is
+needed for validation. `--repl-skin PATH` is an optional existing-file override.
+For Windows GUI capture, install the existing GUI extra as well:
 
 ```console
-python -c "from urllib.request import urlretrieve; urlretrieve('https://raw.githubusercontent.com/HKUDS/CLI-Anything/main/rms/agent-harness/cli_anything/rms/utils/repl_skin.py', 'repl_skin.py')"
+python -m pip install -e ".[dev,gui]"
 ```
 
 For execution, install and authenticate your chosen `codex` or `claude` CLI
@@ -62,16 +64,20 @@ installation nor authentication and makes no coding-agent call.
 
 `deep` requires an existing generated harness containing `setup.py`, a
 generated backend, and `verification.json`. The verification report's target
-must exactly match the target in the supplied evidence bundle, and at least
-one check must have a nonempty target and state `verified` or `corrected`.
-The gate checks the saved report; it does not verify the application again.
-Refresh verification when the application or its available surface changes.
+must exactly match the target in the supplied evidence bundle. The report
+must include either a verified/corrected HTTP or database check, or both a
+verified live GUI window and successful text read from that same PID/window.
+GUI evidence includes the executable path and SHA-256, live window identity,
+and observation time. The handoff checks the current executable against that
+identity; an updated binary requires fresh verification.
 
-In the current verifier, readable databases and reachable HTTP endpoints can
-satisfy this gate. Static IPC findings are `unverifiable`. A successful IPC
-drive or GUI capture alone does not satisfy the gate: `drive.json` and
-`gui.json`, when present, are copied as accompanying observations, but do not
-replace the required verified/corrected check in `verification.json`.
+The gate checks the saved report rather than repeating live verification.
+Refresh it when the application or available surface changes. Static IPC
+findings remain `unverifiable`. `drive.json` and `gui.json` are accompanying
+observations, not substitutes for `verification.json`; merely capturing a
+tree does not prove reads, writes, formatting, or saving. Verified GUI reads
+let an agent start from a supported live surface without requiring an HTTP
+API or database.
 
 The examples below assume `./my-app` is your target and has a readable
 database or an HTTP endpoint that can be verified. Replace that path and the
@@ -84,7 +90,7 @@ Start the application first if its endpoint must be live.
 Generate the baseline harness, then prepare a Codex handoff:
 
 ```powershell
-python -m auto_cli auto --target ./my-app --name my-app --out forge-out --repl-skin ./repl_skin.py
+python -m auto_cli auto --target ./my-app --name my-app --out forge-out
 if ($LASTEXITCODE -ne 0) { throw 'Baseline generation failed; inspect its reports before continuing' }
 
 python -m auto_cli deep `
@@ -124,7 +130,7 @@ Generate the baseline harness, then prepare a handoff. Here the selected
 agent is Claude Code; either agent can be prepared without being installed.
 
 ```bash
-python -m auto_cli auto --target ./my-app --name my-app --out forge-out --repl-skin ./repl_skin.py
+python -m auto_cli auto --target ./my-app --name my-app --out forge-out
 if [ "$?" -ne 0 ]; then echo 'Baseline generation failed; inspect its reports before continuing' >&2; exit 1; fi
 
 python -m auto_cli deep \
@@ -161,8 +167,17 @@ To refresh verification on an existing harness in either shell:
 python -m auto_cli verify --bundle ./forge-out/evidence-bundle.json --dir ./forge-out/my-app/agent-harness
 ```
 
-Read `VERIFICATION.md` afterward. The handoff still requires at least one
-verified/corrected check; completing the `verify` command alone is insufficient.
+Read `VERIFICATION.md` afterward. Completing `verify` alone is insufficient;
+inspect whether its checks satisfy the handoff gate. For an already-running
+Windows application, add its class and, if necessary, a current selector:
+
+```powershell
+python -m auto_cli verify --bundle ./forge-out/evidence-bundle.json --dir ./forge-out/my-app/agent-harness --gui-process WordPadClass --gui-pid 1234
+```
+
+Replace the example PID with the actual current process. The selected window
+must belong to the bundle's executable target. This performs discovery and
+text reads without editing the document.
 
 ## Include the handoff in `auto`
 
@@ -176,7 +191,7 @@ PowerShell preparation with Claude Code selected:
 ```powershell
 python -m auto_cli auto `
     --target ./my-app --name my-app --out forge-out `
-    --repl-skin ./repl_skin.py --agent claude `
+    --agent claude `
     --agent-task "Add search and export workflows using verified data" `
     --agent-timeout 1200 --agent-prepare-only
 ```
@@ -186,7 +201,7 @@ Bash preparation with Codex selected:
 ```bash
 python -m auto_cli auto \
     --target ./my-app --name my-app --out forge-out \
-    --repl-skin ./repl_skin.py --agent codex \
+    --agent codex \
     --agent-task "Add search and export workflows using verified data" \
     --agent-timeout 1200 --agent-prepare-only
 ```
@@ -196,6 +211,21 @@ the harness you just inspected without regenerating it, use the standalone
 `deep` command instead. `auto --agent-prepare-only` still performs recon,
 generation, verification, and baseline validation; the flag skips only the
 coding-agent execution and its subsequent validation.
+
+For a GUI-only WordPad target, the direct launch can supply the verified
+window/read evidence and keep the application alive through the handoff:
+
+```powershell
+$wordpad = Join-Path $env:ProgramFiles 'Windows NT\Accessories\wordpad.exe'
+python -m auto_cli auto --target $wordpad --launch --name wordpad --out gui-out --agent codex --agent-task "Extend the verified document workflow" --agent-prepare-only
+```
+
+Bare `--launch` launches the executable target itself. Auto-CLI keeps its
+owned launch running through GUI capture, verification, and the optional
+agent stage, and cleans it up when the run ends. Omit `--agent-prepare-only`
+to execute the installed agent. The recognized English WordPad adapter
+already supplies a document workflow without an agent; see
+[Windows workflows](windows-workflows.md) before commissioning extra code.
 
 ## Options
 
@@ -265,9 +295,12 @@ package imports, the JSON flag and command presence, registry metadata, and
 the repl skin. It runs the entire generated
 `cli_anything/<module>/tests/` directory with the same Python interpreter.
 These tests are intended to use temporary databases or controlled responses
-without requiring the application. Passing them does not prove that every
-new workflow works against a live target. Inspect the changed code and test
-the workflows against your application separately.
+without requiring the application. The report explicitly labels the result
+as package/unit validation with `live_workflow_verified: false`. Passing
+validation does not prove that a new workflow works against a live target.
+The agent is asked to run and record applicable real-application checks
+separately; inspect those results and the changed code before depending on
+the workflow.
 
 Auto-CLI invokes Codex with `exec --sandbox workspace-write` and Claude Code
 with `--print --permission-mode acceptEdits`. It does not request permission
@@ -298,7 +331,9 @@ the overall `auto` result fail with exit `2`.
 
 For a missing or mismatched verification report, rerun `verify` using the
 same bundle and harness. If all checks are failed or unverifiable, make the
-target accessible and verify it again; GUI/IPC observations alone cannot
+target accessible and verify it again. For a GUI-only app, use `verify` with
+`--gui-process` and the current PID/title as needed, or `auto --launch` for a
+direct executable target. A saved tree or static IPC observation alone cannot
 unlock `deep`. For missing agents or authentication/permission failures,
 check PATH and the agent's own configuration, then inspect its stderr log
 if one was created.
