@@ -18,6 +18,12 @@
 
 For a reproducible first example, paste the [full copy-and-paste quickstart](#copy-and-paste-quickstart-windows-powershell): it builds a small SQLite library app, generates its CLI, and exports a CSV.
 
+For richer commands and multi-step workflows, see the
+[Codex and Claude Code guide](docs/deep-workflows.md). For test coverage,
+GitHub Actions results, and local real-app testing, see the
+[CI guide](docs/ci.md). The [documentation index](docs/README.md) links these
+guides and the runnable examples.
+
 *Auto-CLI is an independent project. It is not affiliated with [REA](https://github.com/morluto/rea) or [CLI-Anything](https://github.com/HKUDS/CLI-Anything); it uses REA's recon and outputs harnesses in CLI-Anything's layout.*
 
 ## A real Windows app, driven by its generated CLI
@@ -171,6 +177,21 @@ fallback (which may download REA).
 
 ## Usage
 
+Choose the generation path that fits your task:
+
+| You want to… | Use |
+| --- | --- |
+| Discover an app and create a generic harness | `pipeline` |
+| Also verify findings and generate supported table/endpoint commands | `auto` |
+| Add richer workflows to an existing verified harness | `deep --agent codex` or `deep --agent claude` |
+| Include the coding agent in a fresh generation | `auto --agent codex` or `auto --agent claude` |
+| Review the agent handoff before execution | `deep --prepare-only` or `auto --agent-prepare-only`, with `--agent` |
+
+`pipeline` does not run live verification. Both agent handoff modes require
+at least one verified or corrected finding; the
+[workflow guide](docs/deep-workflows.md) covers prerequisites, options,
+saved reports, and troubleshooting.
+
 One shot:
 
 ```bash
@@ -312,7 +333,7 @@ possible proxy interception, not app behavior.
 ### The full agent loop
 
 ```bash
-auto-cli pipeline --target ./my-app --name my-app        # recon + scaffold + validate
+auto-cli pipeline --target ./my-app --name my-app --repl-skin repl_skin.py
 # start the app's backend...
 auto-cli verify --bundle forge-out/evidence-bundle.json \
     --dir forge-out/my-app/agent-harness                      # prove findings live
@@ -360,6 +381,10 @@ uses your configured agent account and provider billing, and sends the
 handoff evidence to that provider. The agent keeps its normal permission
 controls (Codex workspace-write; Claude Code acceptEdits); test execution
 may require scoped shell permissions in your agent setup.
+
+See [the full workflow guide](docs/deep-workflows.md) for PowerShell and Bash
+examples, the `deep`/`auto` option mapping, run artifacts, and recovery after
+an agent or validation failure.
 
 ### Previous demo experiment: how far does an agent get?
 
@@ -560,8 +585,11 @@ That run exercised the generated commands against its live app: `tracks list`,
 
 ## Development
 
+Use Python 3.10+ and a supported Node.js version; CI uses Node.js 24.22.1
+for the Inspector transport tests. Install the package and test dependencies:
+
 ```bash
-pip install -e ".[dev]"
+python -m pip install -e ".[dev]" "setuptools>=68" wheel
 python -m pytest tests/ -q
 ```
 
