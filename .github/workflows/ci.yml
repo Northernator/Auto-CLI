@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ['3.10', '3.13']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24.22.1'
+          package-manager-cache: false
+      - run: python -m pip install -e ".[dev]" "setuptools>=68" wheel
+      - run: python -m pytest -q --junitxml=test-results/unit.xml
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: tests-${{ matrix.os }}-py${{ matrix.python }}
+          path: test-results/
+          retention-days: 14
+
+  package:
+    name: Build and install package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: '3.13'
+      - run: python -m pip install build==1.4.0
+      - run: python -m build
+      - name: Smoke test the wheel outside the checkout
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/package-smoke"
+          "$RUNNER_TEMP/package-smoke/bin/python" -m pip install --no-deps dist/*.whl
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/package-smoke/bin/auto-cli" --help
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: distributions
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  real-apps:
+    name: Real REA, sqlite-utils and Datasette
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      AUTO_CLI_REAL_APPS: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/requirements-integration.txt
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24.22.1'
+          package-manager-cache: false
+      - run: python -m pip install -e ".[dev]" -r .github/requirements-integration.txt
+      - name: Install pinned REA outside the checkout
+        run: npm install --prefix "$RUNNER_TEMP/auto-cli-rea" --omit=optional --no-audit --no-fund rea-agents@6.8.0
+      - name: Exercise discovery, verification and generated commands
+        env:
+          AUTO_CLI_TEST_ARTIFACTS: ${{ runner.temp }}/auto-cli-real-apps
+          REA_BIN: ${{ runner.temp }}/auto-cli-rea/node_modules/rea-agents/scripts/rea.mjs
+        run: python -m pytest -q tests/test_integration_apps.py --junitxml=test-results/real-apps.xml
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: real-app-evidence
+          path: |
+            ${{ runner.temp }}/auto-cli-real-apps/
+            test-results/
+          retention-days: 14
