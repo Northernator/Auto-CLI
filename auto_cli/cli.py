@@ -11,6 +11,7 @@
     auto-cli verify    --bundle FILE --dir DIR     # prove findings live
     auto-cli drive     --bundle FILE --dir DIR --inspector URL   # drive live channels
     auto-cli complete  --bundle FILE --dir DIR     # generate domain surface
+    auto-cli deep      --bundle FILE --dir DIR --agent codex|claude
     auto-cli auto      --target PATH [--launch CMD] [--inspector URL] [--name NAME]
 """
 
@@ -27,6 +28,7 @@ from pathlib import Path
 from . import evidence as ev
 from . import (
     complete as cmp_mod,
+    deep,
     drive as drv,
     gui as gui_mod,
     rea_client,
@@ -395,6 +397,12 @@ def cmd_complete(args) -> int:
 def cmd_auto(args) -> int:
     """Fully automatic: recon -> scaffold -> verify -> drive -> complete ->
     validate. Launches the app itself when --launch is given."""
+    if not args.agent and (args.agent_prepare_only or args.agent_task or args.agent_timeout != 900):
+        print("agent options require --agent codex|claude", file=sys.stderr)
+        return 2
+    if args.agent_timeout <= 0:
+        print("agent timeout must be greater than zero", file=sys.stderr)
+        return 2
     loc = rea_client.find_rea()
     if not loc:
         print("REA not found. Install: npm install -g rea-agents", file=sys.stderr)
@@ -526,9 +534,39 @@ def cmd_auto(args) -> int:
         for line in report.lines():
             print("      " + line)
     ok = report.ok and not gui_failed
+    if args.agent and ok:
+        print(f"[deep] handing verified findings to {args.agent}...", flush=True)
+        try:
+            deep_report = deep.generate(
+                bundle, root, agent=args.agent, task=args.agent_task,
+                timeout=args.agent_timeout, prepare_only=args.agent_prepare_only,
+            )
+            print(f"      deep: {deep_report.status} ({deep_report.run_dir})")
+            if deep_report.error:
+                print(f"      {deep_report.error}", file=sys.stderr)
+            ok = deep_report.ok
+        except (OSError, ValueError) as exc:
+            print(f"deep: {exc}", file=sys.stderr)
+            ok = False
     print(f"result: {'OK' if ok else 'FAILED'}")
     print(f"harness: {root}")
     return 0 if ok else 2
+
+
+def cmd_deep(args) -> int:
+    try:
+        report = deep.generate(
+            _load_bundle(args.bundle), args.dir, agent=args.agent, task=args.task,
+            timeout=args.timeout, prepare_only=args.prepare_only,
+        )
+    except (OSError, ValueError) as exc:
+        print(f"deep: {exc}", file=sys.stderr)
+        return 2
+    print(f"deep: {report.status}")
+    print(f"artifacts: {report.run_dir}")
+    if report.error:
+        print(report.error, file=sys.stderr)
+    return 0 if report.ok else 2
 
 
 def cmd_gui(args) -> int:
@@ -847,6 +885,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--bundle", required=True)
     sp.add_argument("--dir", required=True, help="generated scaffold dir (agent-harness)")
 
+    sp = sub.add_parser("deep", help="hand verified findings to a coding agent for richer commands and workflows")
+    sp.add_argument("--bundle", required=True)
+    sp.add_argument("--dir", required=True, help="generated scaffold dir with verification.json")
+    sp.add_argument("--agent", choices=["codex", "claude"], required=True)
+    sp.add_argument("--task", default="", help="workflow priorities for the coding agent")
+    sp.add_argument("--timeout", type=int, default=900, help="agent timeout in seconds")
+    sp.add_argument("--prepare-only", action="store_true", help="write handoff artifacts without running an agent")
+
     sp = sub.add_parser(
         "auto",
         help="fully automatic: recon -> scaffold -> verify -> drive -> complete -> validate",
@@ -868,6 +914,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--probe", action="append")
     sp.add_argument("--timeout", type=int, default=600)
     sp.add_argument("--repair", action="store_true", help="one regeneration pass if validation fails")
+    sp.add_argument("--agent", choices=["codex", "claude"], default=None, help="optional deep workflow generation after base validation")
+    sp.add_argument("--agent-task", default="", help="workflow priorities for the coding agent")
+    sp.add_argument("--agent-timeout", type=int, default=900, help="agent timeout in seconds")
+    sp.add_argument("--agent-prepare-only", action="store_true", help="prepare the handoff without running the selected agent")
     sp.add_argument("--gui-process", default=None, dest="gui_process", help="GUI leg: window ClassName")
     sp.add_argument("--gui-pid", type=int, default=None, dest="gui_pid")
     sp.add_argument("--gui-title", default=None, dest="gui_title", help="GUI leg: window title substring")
@@ -924,6 +974,7 @@ def main(argv: list[str] | None = None) -> int:
         "verify": cmd_verify,
         "drive": cmd_drive,
         "complete": cmd_complete,
+        "deep": cmd_deep,
         "auto": cmd_auto,
         "gui": cmd_gui,
     }[args.command](args)
