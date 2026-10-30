@@ -85,7 +85,15 @@ def _probe(rea, command, args, root):
     (root / f"{command}.json").write_text(
         json.dumps(result.envelope if result.ok else result.error, indent=2), encoding="utf-8"
     )
-    assert result.ok, f"real REA {command} failed: {result.error}"
+    (root / f"{command}.probe.json").write_text(
+        json.dumps(result.to_dict(), indent=2), encoding="utf-8"
+    )
+    (root / f"{command}.stderr.log").write_text(result.stderr, encoding="utf-8")
+    assert result.ok, (
+        f"real REA {command} failed (exit {result.returncode}): "
+        f"{result.stderr[-4000:] or (result.error or {}).get('message', '')}; "
+        f"see {root / (command + '.json')} and {root / (command + '.probe.json')}"
+    )
     return result
 
 
