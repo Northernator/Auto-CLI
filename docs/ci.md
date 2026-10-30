@@ -80,7 +80,7 @@ This workflow retains uploaded artifacts for **14 days**.
 | --- | --- |
 | `tests-<os>-py<version>` | A matrix job's JUnit XML, written as `test-results/unit.xml`; inspect failures, skipped cases, and test durations. |
 | `distributions` | The source archive and wheel from `dist/`, after a successful package build and installation smoke test. |
-| `real-app-evidence` | JUnit results from `test-results/real-apps.xml`, plus per-test REA envelopes, `evidence-bundle.json`, generated harnesses, verification JSON/Markdown, `datasette.log`, and `tool-versions.json`. |
+| `real-app-evidence` | JUnit results from `test-results/real-apps.xml`, plus per-test REA envelopes, `<command>.probe.json` (including exit status), `<command>.stderr.log`, `evidence-bundle.json`, generated harnesses, verification JSON/Markdown, `datasette.log`, and `tool-versions.json`. |
 
 Test-result and real-app uploads run even after a test failure and preserve the
 files produced before it. An installation or startup failure may leave only
@@ -177,6 +177,7 @@ python -m pip install -r .github/requirements-integration.txt
     export REA_BIN="$integration_root/tools/node_modules/rea-agents/scripts/rea.mjs"
     export AUTO_CLI_REAL_APPS=1
     export AUTO_CLI_TEST_ARTIFACTS="$integration_root/evidence"
+    export COLUMNS=4096
     python -m pytest -q -rs tests/test_integration_apps.py --junitxml="$AUTO_CLI_TEST_ARTIFACTS/real-apps.xml"
 )
 ```
@@ -193,12 +194,24 @@ silent skip. An unsupported REA capability, unsuccessful discovery, or failed
 application startup also fails the test. Use a fresh evidence directory on each
 run to avoid reusing an earlier database or client fixture.
 
+The Linux integration job and Bash example set `COLUMNS=4096` because REA 6.8.0
+uses `ps` command output to confirm its worker's executable identity. Procps can
+otherwise truncate a long Node.js executable path at its default display width,
+causing cleanup to fail even after analysis produces a complete evidence
+envelope. A wider display preserves the identity check; it does not disable
+cleanup verification or accept a nonzero REA exit status. The Bash override is
+confined to the subshell.
+
 ## Investigate a failure and rerun
 
 First inspect the failed job and step for the relevant commit. For a dependency
 installation failure, check package acquisition and runtime versions before
 debugging test logic. For a test failure, download its JUnit and available
 real-app evidence, then reproduce with the same Python minor and Node version.
+If REA returns an evidence envelope but exits unsuccessfully, inspect its
+`.probe.json` and `.stderr.log` as well as the envelope. In particular, an
+`owned launcher command identity did not match` error with a visibly shortened
+Node path calls for the Linux display-width setting above.
 
 These focused commands run from the configured environment:
 

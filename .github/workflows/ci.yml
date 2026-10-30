@@ -99,6 +99,9 @@ jobs:
         env:
           AUTO_CLI_TEST_ARTIFACTS: ${{ runner.temp }}/auto-cli-real-apps
           REA_BIN: ${{ runner.temp }}/auto-cli-rea/node_modules/rea-agents/scripts/rea.mjs
+          # REA 6.8.0 verifies worker ownership using ps command output. Keep
+          # the full hosted-toolcache Node path beyond the default 80 columns.
+          COLUMNS: '4096'
         run: python -m pytest -q tests/test_integration_apps.py --junitxml=test-results/real-apps.xml
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
