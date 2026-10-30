@@ -92,6 +92,24 @@ def test_verify_database_file_with_uri_characters(tmp_path):
     assert report.patches["TARGET_ROOT"] == str(tmp_path.resolve())
 
 
+def test_verify_relative_rea_database_finding_for_file_target(tmp_path):
+    db = tmp_path / "library.db"
+    with sqlite3.connect(db) as con:
+        con.execute("CREATE TABLE tracks(id INTEGER PRIMARY KEY)")
+    # A real REA Windows envelope also exposes the file's basename. Its
+    # regex-derived finding precedes the absolute local-filesystem finding.
+    bundle = ev.EvidenceBundle(target=str(db), findings=[
+        ev.Finding(kind="database", value=db.name, source_command="inspect-sqlite-database"),
+        *ev.local_filesystem_probe(db),
+    ])
+    plan = surface.classify(bundle)
+    root = scaffold.generate(plan, bundle, tmp_path / "out", name="library")
+    report = vfy.verify(bundle, plan, root)
+    assert report.checks[0].state == "verified"
+    assert report.checks[0].target == str(db)
+    assert report.patches["TARGET_ROOT"] == str(tmp_path.resolve())
+
+
 def test_verify_patches_backend_endpoints(tmp_path, live_server):
     bundle, plan, root = _bundle_and_scaffold(tmp_path, live_server)
     vfy.verify(bundle, plan, root)

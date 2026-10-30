@@ -186,7 +186,10 @@ def verify(
     dbs = bundle.of_kind("database")
     if dbs:
         rel = dbs[0].value
-        candidates = [Path(plan.target) / rel, Path(rel)]
+        target = Path(plan.target)
+        base = target.parent if target.is_file() else target
+        db = Path(rel)
+        candidates = [db] if db.is_absolute() else [base / db, db]
         db_path = next((p for p in candidates if p.exists()), None)
         if db_path is None:
             report.checks.append(
