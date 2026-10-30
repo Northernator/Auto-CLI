@@ -42,6 +42,22 @@ def test_rea_version_rejects_nonzero_error_text(monkeypatch):
         rea_client.version(rea_client.ReaLocation(["rea"], "test", "test"))
 
 
+def test_probe_retains_process_failure_after_json_evidence(monkeypatch):
+    import json
+
+    envelope = {"normalized_result": {"integrity_contradictions": []}}
+    diagnostic = "Failed to close the JavaScript analysis worker"
+    monkeypatch.setattr(
+        rea_client.subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 1, json.dumps(envelope), diagnostic),
+    )
+    result = rea_client.run_probe(rea_client.ReaLocation(["rea"], "test", "test"), "analyze-javascript-application", ["app"])
+    assert not result.ok and result.envelope is None
+    assert result.error == envelope
+    assert result.to_dict()["returncode"] == 1
+    assert result.to_dict()["stderr"] == diagnostic
+
+
 def test_local_gui_skips_rea_discovery(monkeypatch):
     def unexpected():
         raise AssertionError("local backend must not run REA discovery")
