@@ -1,0 +1,3 @@
+# Preserve the vendored upstream bytes on Windows checkouts.
+auto_cli/_vendor/repl_skin.py text eol=lf
+auto_cli/_vendor/LICENSE.txt text eol=lf

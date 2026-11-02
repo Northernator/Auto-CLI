@@ -168,7 +168,7 @@ def validate(harness_dir: str | Path, python: str | None = None) -> ValidationRe
         try:
             with tempfile.TemporaryDirectory() as td:
                 proc = subprocess.run(
-                    [py, "-m", "pytest", str(test_file), "-q", "--no-header", "-p", "no:cacheprovider"],
+                    [py, "-m", "pytest", str(pkg / "tests"), "-q", "--no-header", "-p", "no:cacheprovider"],
                     capture_output=True,
                     text=True,
                     timeout=300,

@@ -61,6 +61,7 @@ def test_upgrade_scaffold_adds_ui_group(tmp_path, built):
     assert "def ui_invoke" in cli
     assert "TARGET_WINDOW_PROCESS" in (root / "cli_anything" / "gui_app" / "core" / "backend.py").read_text()
     assert "TARGET_WINDOW_PID = 1234" in (root / "cli_anything" / "gui_app" / "core" / "backend.py").read_text()
+    assert "uiautomation>=2.0.20; sys_platform == 'win32'" in (root / "setup.py").read_text()
     assert (root / "cli_anything" / "gui_app" / "utils" / "uia_runner.py").exists()
     # idempotent
     assert gui_mod.upgrade_scaffold(root, r) is False
@@ -150,7 +151,7 @@ def driver(request, monkeypatch):
     exec(compile(gui_mod.UIA_RUNNER_PY, "uia_runner.py", "exec"), runner.__dict__)
     return types.SimpleNamespace(
         root=root,
-        find=lambda pid=None, process=None, title_contains=None: runner.find_window(process, title_contains, pid),
+        find=lambda pid=None, process=None, title_contains=None, executable=None: runner.find_window(process, title_contains, pid, executable),
         resolve=runner.resolve, capture=runner.capture, error=ValueError, module=runner,
     )
 
@@ -171,6 +172,51 @@ def test_find_window_refuses_ambiguous_target(driver):
     driver.root.children = [FakeControl("First"), FakeControl("Second")]
     with pytest.raises(driver.error, match="multiple windows"):
         driver.find(process="App")
+
+
+def test_window_selection_tracks_restart_and_title_changes_with_executable_scope(driver, monkeypatch):
+    paths = {1: "C:/Tools/App.exe", 2: "C:/Other/App.exe", 3: "c:\\tools\\app.exe"}
+    monkeypatch.setattr(driver.module, "window_executable", lambda pid: paths.get(pid, ""))
+    original = FakeControl("Untitled", pid=1)
+    unrelated = FakeControl("Untitled", pid=2)
+    driver.root.children = [original, unrelated]
+    assert driver.find(process="App", executable="C:/Tools/App.exe") is original
+    restarted = FakeControl("Saved document - App", pid=3)
+    driver.root.children = [unrelated, restarted]
+    assert driver.find(process="App", executable="C:/Tools/App.exe") is restarted
+    assert driver.find(process="App", executable="C:/Tools/App.exe", pid=1) is None
+    assert driver.find(process="App", executable="C:/Tools/App.exe", title_contains="Untitled") is None
+
+
+def test_executable_scope_fails_closed_if_identity_cannot_be_read(driver, monkeypatch):
+    monkeypatch.setattr(driver.module, "window_executable", lambda pid: "")
+    driver.root.children = [FakeControl("Window")]
+    assert driver.find(process="App", executable="C:/Tools/App.exe") is None
+
+
+def test_executable_scope_still_requires_explicit_selector_for_multiple_documents(driver, monkeypatch):
+    monkeypatch.setattr(driver.module, "window_executable", lambda pid: "C:/Tools/App.exe")
+    first = FakeControl("First", pid=1)
+    second = FakeControl("Second", pid=2)
+    driver.root.children = [first, second]
+    with pytest.raises(driver.error, match="multiple windows"):
+        driver.find(process="App", executable="C:/Tools/App.exe")
+    assert driver.find(process="App", executable="C:/Tools/App.exe", pid=2) is second
+
+
+def test_capture_and_resolve_deep_document_controls_and_text_pattern(driver):
+    document = FakeControl("Rich document", control_type="DocumentControl")
+    document.GetInvokePattern = lambda: None
+    document.GetTextPattern = lambda: types.SimpleNamespace()
+    control = document
+    for level in range(9):
+        control = FakeControl(f"Pane {level}", children=[control])
+    window = FakeControl("Window", children=[control])
+    nodes = driver.capture(window)
+    captured = next(node for node in nodes if (node.name if isinstance(node, gui_mod.UiNode) else node["name"]) == "Rich document")
+    patterns = captured.patterns if isinstance(captured, gui_mod.UiNode) else captured["patterns"]
+    assert "Text" in patterns
+    assert driver.resolve(window, "Rich document") is document
 
 
 def test_resolve_matches_unnamed_controls_as_captured(driver):
@@ -227,7 +273,11 @@ def generated_runner(monkeypatch):
 
 
 def _run_generated(runner, monkeypatch, capsys, command, path, *flags):
-    monkeypatch.setattr(sys, "argv", ["uia_runner.py", command, path, "--process", "App", *flags])
+    literal = [command, path]
+    if command == "set-value" and flags:
+        literal += [flags[0]]
+        flags = flags[1:]
+    monkeypatch.setattr(sys, "argv", ["uia_runner.py", "--process=App", *flags, "--", *literal])
     status = runner.module.main()
     return status, json.loads(capsys.readouterr().out)
 
@@ -294,7 +344,8 @@ def test_generated_runner_read_text_refuses_ambiguous_path(generated_runner, mon
 def test_generated_runner_mutations_still_require_confirmation(generated_runner, monkeypatch, capsys, command):
     target = FakeControl("Text editor")
     generated_runner.root.children = [FakeControl("Window", children=[target])]
-    status, payload = _run_generated(generated_runner, monkeypatch, capsys, command, "Text editor")
+    args = ("replacement",) if command == "set-value" else ()
+    status, payload = _run_generated(generated_runner, monkeypatch, capsys, command, "Text editor", *args)
     assert status == 2
     assert "--yes" in payload["detail"]
     target.invoke.assert_not_called()
@@ -325,7 +376,7 @@ def test_generated_ui_command_exits_nonzero_on_runner_failure(monkeypatch):
 
     namespace = {"click": click, "main": main, "_emit": lambda ctx, payload: click.echo(json.dumps(payload))}
     exec(gui_mod.UI_CLI_TEMPLATE, namespace)
-    monkeypatch.setitem(namespace, "_uia_run", lambda args: {"ok": False, "detail": "target window not found"})
+    monkeypatch.setitem(namespace, "_uia_run", lambda args, **options: {"ok": False, "detail": "target window not found"})
     result = CliRunner().invoke(main, ["ui-tree"])
     assert result.exit_code == 2
     assert json.loads(result.output)["ok"] is False
@@ -346,10 +397,161 @@ def test_generated_ui_read_text_forwards_without_confirmation(monkeypatch):
     result = CliRunner().invoke(main, ["ui-read-text", "Text editor"])
     assert result.exit_code == 0
     assert json.loads(result.output)["text"] == "Release notes"
-    run.assert_called_once_with(["read-text", "Text editor"])
+    run.assert_called_once_with(["read-text", "Text editor"], pid=None, title=None)
 
 
-def test_generated_ui_runner_preserves_captured_pid(tmp_path, monkeypatch):
+@pytest.mark.parametrize("arguments", [
+    ["ui-info"], ["ui-tree"], ["ui-menus"], ["ui-read-text", "Editor"],
+    ["ui-invoke", "Button", "--yes", "--allow-destructive"],
+    ["ui-select", "Item", "--yes"], ["ui-set-text", "Editor", "new text", "--yes"],
+])
+def test_every_public_ui_command_accepts_current_target_overrides(monkeypatch, arguments):
+    import click
+    from click.testing import CliRunner
+
+    @click.group()
+    def main():
+        pass
+
+    namespace = {"click": click, "main": main, "_emit": lambda ctx, payload: click.echo(json.dumps(payload))}
+    exec(gui_mod.UI_CLI_TEMPLATE, namespace)
+    run = Mock(return_value={"ok": True})
+    monkeypatch.setitem(namespace, "_uia_run", run)
+    result = CliRunner().invoke(main, [*arguments, "--pid", "4321", "--title", "Current document"])
+    assert result.exit_code == 0, result.output
+    assert run.call_args.kwargs["pid"] == 4321
+    assert run.call_args.kwargs["title"] == "Current document"
+    if "--allow-destructive" in arguments:
+        assert run.call_args.kwargs["allow_destructive"] is True
+    if arguments[0] in {"ui-tree", "ui-menus"}:
+        assert run.call_args.kwargs["max_depth"] == 12
+        assert run.call_args.kwargs["max_nodes"] == 400
+
+
+def test_generated_runner_denied_mutation_and_positive_control(generated_runner, monkeypatch, capsys):
+    editor = FakeControl("Editor")
+    setter = Mock()
+    editor.GetValuePattern = lambda: types.SimpleNamespace(SetValue=setter)
+    generated_runner.root.children = [FakeControl("Window", children=[editor])]
+    status, payload = _run_generated(generated_runner, monkeypatch, capsys, "set-value", "Editor", "new text")
+    assert status == 2
+    assert payload["error"] == "approval_required"
+    setter.assert_not_called()
+    status, payload = _run_generated(generated_runner, monkeypatch, capsys, "set-value", "Editor", "new text", "--yes")
+    assert status == 0
+    setter.assert_called_once_with("new text")
+
+
+def test_generated_runner_destructive_override_reaches_live_control(generated_runner, monkeypatch, capsys):
+    button = FakeControl("Save")
+    generated_runner.root.children = [FakeControl("Window", children=[button])]
+    status, payload = _run_generated(generated_runner, monkeypatch, capsys, "invoke", "Save", "--yes", "--allow-destructive")
+    assert status == 0
+    button.invoke.assert_called_once_with()
+
+
+def test_generated_runner_invalid_bounds_and_syntax_emit_json(generated_runner, monkeypatch, capsys):
+    for arguments in (["tree", "--max-depth", "0"], ["tree", "--max-nodes", "10001"], ["no-such-command"]):
+        monkeypatch.setattr(sys, "argv", ["uia_runner.py", *arguments])
+        assert generated_runner.module.main() == 2
+        assert json.loads(capsys.readouterr().out)["error"] == "invalid_input"
+
+
+@pytest.fixture()
+def public_gui_runner(generated_runner, tmp_path, monkeypatch):
+    """Exercise public Click commands through their actual child argv parser."""
+    import contextlib
+    import io
+    import click
+    from click.testing import CliRunner
+
+    @click.group()
+    def main():
+        pass
+
+    namespace = {
+        "click": click, "main": main, "json": json,
+        "__file__": str(tmp_path / "app_cli.py"),
+        "backend": types.SimpleNamespace(TARGET_WINDOW_PROCESS="App", TARGET_WINDOW_EXECUTABLE="C:/App.exe"),
+        "_emit": lambda ctx, payload: click.echo(json.dumps(payload)),
+    }
+    exec(gui_mod.UI_CLI_TEMPLATE, namespace)
+    monkeypatch.setattr(generated_runner.module, "window_executable", lambda pid: "C:/App.exe")
+    calls = []
+
+    def child_run(argv, **kwargs):
+        calls.append(argv)
+        output = io.StringIO()
+        with monkeypatch.context() as context:
+            context.setattr(sys, "argv", [argv[1], *argv[2:]])
+            with contextlib.redirect_stdout(output):
+                status = generated_runner.module.main()
+        return types.SimpleNamespace(returncode=status, stdout=output.getvalue(), stderr="")
+
+    monkeypatch.setattr(namespace["_sp"], "run", child_run)
+    return types.SimpleNamespace(root=generated_runner.root, cli=main, runner=CliRunner(), calls=calls)
+
+
+@pytest.mark.parametrize("path,text", [("Editor", "--yes"), ("--yes", "replacement"), ("--pid", "--yes")])
+def test_public_gui_literal_options_cannot_supply_mutation_consent(public_gui_runner, path, text):
+    setter = Mock()
+    control = FakeControl(path)
+    control.GetValuePattern = lambda: types.SimpleNamespace(SetValue=setter)
+    public_gui_runner.root.children = [FakeControl("Window", children=[control])]
+    result = public_gui_runner.runner.invoke(public_gui_runner.cli, ["ui-set-text", "--", path, text])
+    assert result.exit_code == 2
+    assert json.loads(result.output)["error"] == "approval_required"
+    assert public_gui_runner.calls == []
+    setter.assert_not_called()
+
+
+@pytest.mark.parametrize("path,text", [
+    ("--yes", "--pid=999"), ("--pid", "--allow-destructive"),
+    ("Éditeur 東京", "--title\nRésumé – approved ✓"),
+])
+def test_public_gui_optionlike_and_unicode_literals_round_trip_unchanged(public_gui_runner, path, text):
+    setter = Mock()
+    control = FakeControl(path)
+    control.GetValuePattern = lambda: types.SimpleNamespace(SetValue=setter)
+    public_gui_runner.root.children = [FakeControl("--pid document", children=[control], pid=777)]
+    result = public_gui_runner.runner.invoke(public_gui_runner.cli, [
+        "ui-set-text", "--yes", "--pid", "777", "--title=--pid", "--", path, text,
+    ])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["ok"] is True
+    setter.assert_called_once_with(text)
+    argv = public_gui_runner.calls[0]
+    sentinel = argv.index("--")
+    assert argv[sentinel + 1:] == ["set-value", path, text]
+    assert "--yes" in argv[:sentinel]
+    assert "--pid=777" in argv[:sentinel]
+    assert "--title=--pid" in argv[:sentinel]
+    assert "--pid=999" not in argv[:sentinel]
+
+
+def test_public_gui_literal_override_does_not_disable_destructive_guard(public_gui_runner):
+    setter = Mock()
+    control = FakeControl("Save")
+    control.GetValuePattern = lambda: types.SimpleNamespace(SetValue=setter)
+    public_gui_runner.root.children = [FakeControl("Window", children=[control])]
+    result = public_gui_runner.runner.invoke(public_gui_runner.cli, ["ui-set-text", "--yes", "Save", "--", "--allow-destructive"])
+    assert result.exit_code == 2
+    assert json.loads(result.output)["error"] == "destructive_path"
+    setter.assert_not_called()
+
+
+def test_public_gui_tree_limits_are_options_before_literal_sentinel(public_gui_runner):
+    public_gui_runner.root.children = [FakeControl("Window")]
+    result = public_gui_runner.runner.invoke(public_gui_runner.cli, ["ui-tree", "--max-depth", "20", "--max-nodes", "750"])
+    assert result.exit_code == 0, result.output
+    argv = public_gui_runner.calls[0]
+    sentinel = argv.index("--")
+    assert "--max-depth=20" in argv[:sentinel]
+    assert "--max-nodes=750" in argv[:sentinel]
+    assert argv[sentinel + 1:] == ["tree"]
+
+
+def test_generated_ui_runner_uses_stable_identity_instead_of_captured_pid_and_title(tmp_path, monkeypatch):
     import click
 
     @click.group()
@@ -361,6 +563,7 @@ def test_generated_ui_runner_preserves_captured_pid(tmp_path, monkeypatch):
         "__file__": str(tmp_path / "notes_cli.py"),
         "backend": types.SimpleNamespace(
             TARGET_WINDOW_PROCESS="Notepad", TARGET_WINDOW_TITLE="Untitled - Notepad", TARGET_WINDOW_PID=1234,
+            TARGET_WINDOW_EXECUTABLE="C:/Windows/notepad.exe",
         ),
     }
     exec(gui_mod.UI_CLI_TEMPLATE, namespace)
@@ -368,9 +571,41 @@ def test_generated_ui_runner_preserves_captured_pid(tmp_path, monkeypatch):
     monkeypatch.setattr(namespace["_sp"], "run", run)
     assert namespace["_uia_run"](["tree"]) == {"ok": True}
     args = run.call_args.args[0]
-    assert args[args.index("--pid") + 1] == "1234"
-    assert args[args.index("--process") + 1] == "Notepad"
-    assert args[args.index("--title") + 1] == "Untitled - Notepad"
+    assert "--process=Notepad" in args[:args.index("--")]
+    assert "--executable=C:/Windows/notepad.exe" in args[:args.index("--")]
+    assert args[args.index("--") + 1:] == ["tree"]
+    assert "--pid" not in args
+    assert "--title" not in args
+
+
+def test_generated_ui_runner_without_captured_executable_requires_explicit_target(tmp_path, monkeypatch):
+    import click
+
+    @click.group()
+    def main():
+        pass
+
+    namespace = {
+        "click": click, "main": main, "json": json,
+        "__file__": str(tmp_path / "notes_cli.py"),
+        "backend": types.SimpleNamespace(TARGET_WINDOW_PROCESS="App", TARGET_WINDOW_PID=1234),
+    }
+    exec(gui_mod.UI_CLI_TEMPLATE, namespace)
+    run = Mock(return_value=types.SimpleNamespace(stdout='{"ok": true}', stderr=""))
+    monkeypatch.setattr(namespace["_sp"], "run", run)
+    assert namespace["_uia_run"](["tree"])["error"] == "target_identity_missing"
+    run.assert_not_called()
+    assert namespace["_uia_run"](["tree"], pid=4321) == {"ok": True}
+    args = run.call_args.args[0]
+    assert "--pid=4321" in args[:args.index("--")]
+
+
+def test_generated_runner_import_without_gui_dependency_does_not_exit(monkeypatch):
+    monkeypatch.setitem(sys.modules, "uiautomation", None)
+    namespace = {"__name__": "runner_without_uia"}
+    exec(compile(gui_mod.UIA_RUNNER_PY, "uia_runner.py", "exec"), namespace)
+    with pytest.raises(ValueError, match="uiautomation unavailable"):
+        namespace["find_window"](process="App")
 
 
 @pytest.fixture(autouse=True)

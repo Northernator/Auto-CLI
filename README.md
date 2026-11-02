@@ -1,20 +1,33 @@
 # auto-cli
 
+[![CI](https://github.com/Northernator/Auto-CLI/actions/workflows/ci.yml/badge.svg)](https://github.com/Northernator/Auto-CLI/actions/workflows/ci.yml)
+
 **Point it at software. Get an agent-native CLI.**
 
-> **Windows-first.** Live GUI testing has covered Windows Notepad and Calculator. The core unit suite also runs on Linux; broader app and platform coverage is still limited. Issues and PRs welcome.
+> **Windows-first.** Live GUI testing has covered Windows Notepad, Calculator, and a native English WordPad document round trip. The core unit suite also runs on Linux and macOS; broader app and platform coverage is still limited. Issues and PRs welcome.
 
 ### Getting started (3 steps)
+
 1. Install Git, Python 3.10+ and Node.js (22.19+, 24.11+ or 26+), then `npm i -g rea-agents`.
 2. `pip install "git+https://github.com/Northernator/Auto-CLI.git@main" pytest click prompt-toolkit`
-3. Fetch CLI-Anything's repl skin, check REA, and generate:
+3. Check REA and generate (the original CLI-Anything REPL skin is bundled):
    ```powershell
-   Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/HKUDS/CLI-Anything/main/rms/agent-harness/cli_anything/rms/utils/repl_skin.py' -OutFile repl_skin.py
    python -m auto_cli doctor
-   python -m auto_cli auto --target <app-or-folder> --name <name> --out out --repl-skin repl_skin.py
+   python -m auto_cli auto --target "C:\path\to\app" --name my-app --out out
    ```
 
 For a reproducible first example, paste the [full copy-and-paste quickstart](#copy-and-paste-quickstart-windows-powershell): it builds a small SQLite library app, generates its CLI, and exports a CSV.
+
+For richer commands and multi-step workflows, see the
+[Codex and Claude Code guide](docs/deep-workflows.md). For test coverage,
+GitHub Actions results, and local real-app testing, see the
+[CI guide](docs/ci.md). The [documentation index](docs/README.md) links these
+guides and the runnable examples.
+
+For a complete native document workflow, see the
+[Windows and WordPad guide](docs/windows-workflows.md): generate a CLI, open
+an RTF copy, replace and append text, bold a heading, save through WordPad,
+then reopen and verify the result.
 
 *Auto-CLI is an independent project. It is not affiliated with [REA](https://github.com/morluto/rea) or [CLI-Anything](https://github.com/HKUDS/CLI-Anything); it uses REA's recon and outputs harnesses in CLI-Anything's layout.*
 
@@ -40,11 +53,12 @@ local file; it does not invoke Notepad's Save command.
 
 [REA](https://github.com/morluto/rea) (`npm i -g rea-agents`) reverse-engineers
 software for agents. [CLI-Anything](https://github.com/HKUDS/CLI-Anything) is a
-registry of hand-written CLI harnesses that make software agent-native. The
-missing piece between them: REA tells you *what an app's automation surface
-is*; CLI-Anything needs a human to write a harness over it. auto-cli is
-that bridge — it runs the recon, classifies what it found, and forges a
-registry-ready harness skeleton with the evidence attached.
+CLI harness generator and registry: its AI coding agents implement commands,
+tests, and workflows. Auto-CLI complements that approach with automated REA
+reconnaissance, evidence and provenance, live runtime verification, and
+support for targets with limited source access. It runs the recon,
+classifies what it found, and forges a registry-ready harness skeleton with
+the evidence attached.
 
 ```
 target app ──► REA probes ──► findings ──► surface classifier ──► scaffold ──► validator
@@ -61,11 +75,12 @@ target app ──► REA probes ──► findings ──► surface classifier 
 | `surface` | classify a bundle into a harness plan (flavor + commands + risks) |
 | `scaffold` | generate the CLI-Anything harness skeleton from a bundle |
 | `pipeline` | recon → classify → scaffold → validate |
-| `verify` | prove findings against the **live** app; patches constants, writes `VERIFICATION.md` |
+| `verify` | prove findings against the **live** app, including optional target-bound GUI reads; writes `VERIFICATION.md` |
 | `drive` | attach to a running app's Inspector, exercise IPC channels, implement `send` |
 | `complete` | generate table groups from readable schemas and commands for verified endpoints |
+| `deep` | optionally hand verified findings to Codex or Claude Code for richer commands, workflows, and tests |
 | `gui` | Windows GUI driving via UIA: tree capture + gated actions + scaffold upgrade |
-| `auto` | recon → scaffold → verify → optional IPC drive → complete → optional GUI capture → validate |
+| `auto` | recon → scaffold → verify → optional IPC drive → complete → optional GUI capture → validate → optional coding-agent generation |
 | `validate` | check a harness against CLI-Anything CONTRIBUTING rules |
 
 Classification and scaffold generation work offline from a saved bundle.
@@ -116,9 +131,8 @@ with sqlite3.connect('library-demo/library.db') as connection:
 '@ | & $python -
         if ($LASTEXITCODE -ne 0) { throw 'Could not create the demo database' }
 
-        # Validation needs CLI-Anything's actual repl skin.
-        Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/HKUDS/CLI-Anything/main/rms/agent-harness/cli_anything/rms/utils/repl_skin.py' -OutFile repl_skin.py
-        Invoke-DemoNative $python -m auto_cli auto --target library-demo --name library --out out --repl-skin repl_skin.py
+        # The original CLI-Anything REPL skin and license are bundled.
+        Invoke-DemoNative $python -m auto_cli auto --target library-demo --name library --out out
         Invoke-DemoNative $python -m pip install --editable ./out/library/agent-harness
         $library = Join-Path $PWD '.venv\Scripts\cli-anything-library.exe'
         Invoke-DemoNative $library --json books list
@@ -167,6 +181,22 @@ fallback (which may download REA).
 
 ## Usage
 
+Choose the generation path that fits your task:
+
+| You want to… | Use |
+| --- | --- |
+| Discover an app and create a generic harness | `pipeline` |
+| Also verify findings and generate supported table/endpoint commands | `auto` |
+| Add richer workflows to an existing verified harness | `deep --agent codex` or `deep --agent claude` |
+| Include the coding agent in a fresh generation | `auto --agent codex` or `auto --agent claude` |
+| Review the agent handoff before execution | `deep --prepare-only` or `auto --agent-prepare-only`, with `--agent` |
+
+`pipeline` does not run live verification. Both agent handoff modes require
+a verified/corrected HTTP or database check, or a verified GUI window and
+successful read bound to the target executable; the
+[workflow guide](docs/deep-workflows.md) covers prerequisites, options,
+saved reports, and troubleshooting.
+
 One shot:
 
 ```bash
@@ -186,13 +216,10 @@ The multi-line examples below use Bash syntax; in PowerShell put the
 command on one line or replace a trailing `\` with a backtick.
 
 Options: `--probe <cmd>` (repeatable) to restrict REA commands,
-`--repl-skin <path>` to drop the plugin's unmodified `repl_skin.py` into the
-generated harness (CONTRIBUTING.md requires a real copy), `--author` for the
-registry entry.
-
-Pass `--repl-skin repl_skin.py` to the `scaffold`, `pipeline`, and `auto`
-examples below for validation to pass. Without it, generation still works but the
-placeholder skin deliberately fails validation (exit 2).
+`--repl-skin <path>` to override the bundled original `repl_skin.py`,
+`--author` for the registry entry. No separate REPL-skin download is required.
+The default includes CLI-Anything's Apache 2.0 license in the generated
+package; an explicit override must name an existing file.
 
 ## Pointing it at things
 
@@ -278,7 +305,8 @@ implementation from `drive` once a channel is confirmed live.
     core/backend.py               # constants baked in from recon + guards
     skills/SKILL.md               # agent-facing manual
     tests/test_core.py            # 8 unit tests, no backend needed
-    utils/repl_skin.py            # placeholder unless --repl-skin given
+    utils/repl_skin.py            # bundled original, or explicit --repl-skin override
+    utils/LICENSE-CLI-Anything.txt # license for the bundled REPL skin
   FORGE-REPORT.md                 # audit trail: probes, findings, risks, todos
   registry-entry.json             # registry.json fragment with all fields
 ```
@@ -286,9 +314,15 @@ implementation from `drive` once a channel is confirmed live.
 Install a generated harness with
 `python -m pip install -e ./forge-out/my-app/agent-harness` (replace the path).
 For JSON output, use
-`cli-anything-my-app --json <command>`. GUI-upgraded harnesses also need
-uiautomation in that Python environment; they use their own local UIA
-runner even when REA captured the original tree.
+`cli-anything-my-app --json <command>`. Without a discovered database, `info`
+returns target, Python runtime and capability metadata instead of failing.
+With a database it retains the database overview. JSON mode emits structured
+errors with nonzero exit status, including invalid commands and denied writes.
+Metadata does not itself prove a live connection.
+
+GUI-upgraded packages declare their Windows `uiautomation` dependency;
+installing the generated package installs it in that environment. They use
+their own local UIA runner even when REA captured the original tree.
 
 ## Closing the loop: verify against the live app
 
@@ -308,13 +342,61 @@ possible proxy interception, not app behavior.
 ### The full agent loop
 
 ```bash
-auto-cli pipeline --target ./my-app --name my-app        # recon + scaffold + validate
+auto-cli pipeline --target ./my-app --name my-app
 # start the app's backend...
 auto-cli verify --bundle forge-out/evidence-bundle.json \
     --dir forge-out/my-app/agent-harness                      # prove findings live
-# agent (or you) reads VERIFICATION.md, adds domain commands + workflows + tests
-auto-cli validate --dir forge-out/my-app/agent-harness   # final gate
+auto-cli deep --bundle forge-out/evidence-bundle.json \
+    --dir forge-out/my-app/agent-harness --agent codex        # implement + validate + test
 ```
+
+### Deeper workflow generation with Codex or Claude Code
+
+`deep` gives an installed, authenticated coding-agent CLI the recon evidence,
+verification results, harness plan, and generated code. It asks the agent to
+implement richer domain commands, multi-step workflows, SKILL.md guidance,
+and regression tests from the verified surface, preserving existing safety
+guards. Use `--agent codex` or `--agent claude`; `--task` adds a specific goal.
+
+First inspect a prepared handoff without calling an agent:
+
+```bash
+auto-cli deep --bundle forge-out/evidence-bundle.json \
+    --dir forge-out/my-app/agent-harness --agent codex \
+    --task "Add a library search and export workflow" --prepare-only
+```
+
+Omit `--prepare-only` to execute. Preparation needs no agent installation or
+authentication. Both modes require a matching `verification.json` with a
+verified/corrected HTTP or database check, or verified GUI window/read evidence
+bound to the current target executable's path and SHA-256. A static `gui.json`
+capture alone is insufficient; GUI reads do not certify editing or saving.
+Failed and unverified findings stay documented limitations.
+
+Each run saves its context under `deep-workflow/run-*/` in the harness, with
+agent logs and validation/test results for executed runs. `DEEP-REPORT.md`
+summarizes the latest run. After the agent finishes, Auto-CLI validates the
+harness and runs all its tests. This is package/unit validation, not proof of
+a successful live workflow. Agent errors, timeouts, validation failures,
+and test failures exit 2; preparation alone does not claim implementation.
+Use `--timeout` to change the default 900-second agent limit.
+
+To include the handoff after the normal `auto` generation and validation:
+
+```bash
+auto-cli auto --target ./my-app --name my-app \
+    --agent claude --agent-task "Add a search and export workflow"
+```
+
+`auto` also accepts `--agent-prepare-only` and `--agent-timeout`. Execution
+uses your configured agent account and provider billing, and sends the
+handoff evidence to that provider. The agent keeps its normal permission
+controls (Codex workspace-write; Claude Code acceptEdits); test execution
+may require scoped shell permissions in your agent setup.
+
+See [the full workflow guide](docs/deep-workflows.md) for PowerShell and Bash
+examples, the `deep`/`auto` option mapping, run artifacts, and recovery after
+an agent or validation failure.
 
 ### Previous demo experiment: how far does an agent get?
 
@@ -412,7 +494,7 @@ auto-cli gui --title "Untitled" --yes \
 ```
 
 What it captures: UIA nodes up to the configured depth and node limit,
-with their patterns (Invoke / Value / ExpandCollapse / SelectionItem /
+with their patterns (Invoke / Value / Text / ExpandCollapse / SelectionItem /
 Toggle), plus expandable menu paths. Successful actions can include a
 window screenshot. Paths accept suffixes; choose an unambiguous path from
 the captured tree.
@@ -423,14 +505,17 @@ Safety model: `tree`/`menus` are read-only; every driving action requires
 
 The scaffold gets top-level `ui-*` commands backed by a self-contained
 `utils/uia_runner.py` copied into the harness (no auto_cli dependency at
-runtime): `ui-tree`, `ui-menus`, `ui-read-text`, `ui-invoke`, `ui-select`,
+runtime): `ui-info`, `ui-tree`, `ui-menus`, `ui-read-text`, `ui-invoke`, `ui-select`,
 `ui-set-text`. Tree capture, menu listing, and text reads are read-only;
-actions require `--yes` and failures exit 2. These generated commands
-refuse destructive-looking paths; the generated CLI does not expose the
-runner's `--allow-destructive` override. The harness stores the captured
-window's process ID, class, and title to target that app session. Restarting
-the app or changing the document's title can require regenerating the
-harness or recapturing its GUI target.
+actions require `--yes` and failures exit 2. Destructive-looking paths also
+require the public `--allow-destructive` option. Commands resolve the current
+window by captured executable and class, so an app restart or document-title
+change does not require regeneration. Every `ui-*` command accepts `--pid`
+and `--title` to narrow the live target; ambiguity fails explicitly. The
+captured PID/title remain evidence rather than default selectors. If capture
+could not resolve the executable, supply an explicit current selector.
+`ui-tree` and `ui-menus` accept bounded `--max-depth` and `--max-nodes` options
+(defaults 12 and 400). Use `ui-info` to inspect the current live identity.
 
 And it's wired into `auto`:
 
@@ -443,6 +528,26 @@ An earlier run on an untitled Notepad reported 51 nodes / 8 menu paths,
 a scaffold upgrade, `result: OK`, and text written through the generated
 `ui-set-text`. UIA exposure varies between Notepad builds; capture and test
 the installed version before relying on those paths.
+
+### Native WordPad document workflow
+
+For an installed English WordPad, `auto` recognizes the native document
+adapter and adds `open`, `read`, `replace`, `append`, `bold`, `save-as` and
+`workflow` without requiring a coding agent:
+
+```powershell
+$wordpad = Join-Path $env:ProgramFiles 'Windows NT\Accessories\wordpad.exe'
+python -m auto_cli auto --target $wordpad --launch --name wordpad --out out
+python -m pip install -e ./out/wordpad/agent-harness
+cli-anything-wordpad --json workflow --input input.rtf --output approved.rtf --old CLIENT_NAME --new "Alex Rowan" --text "Approved for review." --heading "Release checklist" --yes
+```
+
+The workflow edits a private full-RTF copy through RichEdit/UIA, invokes
+WordPad's Save As dialog, reopens the saved RTF, and verifies text and bold
+formatting. It refuses overwrites and checks that the original stayed
+unchanged. See [setup, individual commands, retained evidence and limits](docs/windows-workflows.md).
+This adapter supports the recognized native WordPad surface; arbitrary GUI
+applications still need their own workflow implementation.
 
 ### Platform boundaries
 
@@ -461,17 +566,23 @@ the installed version before relying on those paths.
 
 ## Fully automatic: the `auto` command
 
-One command, no agent in the loop:
+By default, `auto` runs without a coding agent:
 
 ```bash
 auto-cli auto --target ./my-app --name my-app \
     --inspector http://127.0.0.1:9229 \
-    --repl-skin /path/to/plugin/repl_skin.py --repair
+    --repair
 ```
 
 Chain: recon → scaffold → (launch app if `--launch` given) → verify → drive →
 **complete** → validate (+ one repair pass with `--repair`). Works for
 `--target` and `--url`.
+
+Bare `--launch` starts an executable `--target` directly. An explicit launch
+command is also accepted. Auto-CLI keeps its owned process running through
+GUI verification, validation, and an optional agent handoff, then cleans up
+that launch. On Windows, a directly launched executable enables GUI discovery;
+the recognized WordPad target needs no manual GUI PID or class flags.
 
 `complete` generates the domain surface from readable database schemas and
 verified endpoint checks: one command group per supported database table
@@ -503,9 +614,11 @@ That run exercised the generated commands against its live app: `tracks list`,
 
 - **It does not implement every app-specific workflow.** `scaffold` produces
   generic commands; `drive`, `complete`, and `gui` can add working surface
-  from live evidence. MCP, scripting, auth, POST bodies, and unsupported
-  transports still need implementation and review. `FORGE-REPORT.md` records
-  findings, available provenance, and open questions.
+  from live evidence. The optional `deep` handoff can add richer workflows
+  through a coding agent, with validation and tests. MCP, scripting, auth,
+  POST bodies, and unsupported transports still need implementation and
+  review. `FORGE-REPORT.md` records findings, available provenance, and open
+  questions.
 - **It does not launch arbitrary desktop apps by default.** Filesystem recon
   is static. `--url` launches a browser, `--launch` starts the supplied
   command, and IPC/GUI driving needs an accessible live target.
@@ -513,15 +626,26 @@ That run exercised the generated commands against its live app: `tracks list`,
 
 ## Development
 
+Use Python 3.10+ and a supported Node.js version; CI uses Node.js 24.22.1
+for the Inspector transport tests. Install the package and test dependencies:
+
 ```bash
-pip install -e ".[dev]"
+python -m pip install -e ".[dev]" "setuptools>=68" wheel
 python -m pytest tests/ -q
 ```
+
+[CI](https://github.com/Northernator/Auto-CLI/actions/workflows/ci.yml) runs
+the unit suite on Linux, Windows, and macOS, builds distribution packages,
+and exercises real REA discovery and generated commands against
+sqlite-utils-created databases and a live Datasette server on Linux.
+See [CI coverage and local integration commands](docs/ci.md) for scope and
+requirements, including the opt-in WordPad test on an interactive Windows
+desktop. Hosted CI does not exercise live GUI workflows.
 
 Layout: `rea_client` (locate/drive REA), `evidence` (envelope → findings),
 `surface` (findings → plan), `scaffold` (plan → files), `verify` (live
 endpoint/DB checks), `drive` (live-session channel driving + scaffold
 upgrade), `complete` (evidence-driven domain-surface generation), `validate`
-(CONTRIBUTING.md rules). REA capability failures (e.g. a probe needing a
-newer Node, PTY capture on Windows, macOS-only UI observation) are recorded
-as limitations, never crashes.
+(CONTRIBUTING.md rules), `deep` (verified-evidence coding-agent handoff).
+REA capability failures (e.g. a probe needing a newer Node, PTY capture on
+Windows, macOS-only UI observation) are recorded as limitations, never crashes.

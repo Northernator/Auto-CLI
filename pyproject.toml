@@ -22,3 +22,6 @@ auto-cli = "auto_cli.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["auto_cli*"]
+
+[tool.setuptools.package-data]
+"auto_cli._vendor" = ["LICENSE.txt", "README.md"]

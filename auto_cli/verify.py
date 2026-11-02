@@ -14,11 +14,14 @@ corrected constant is patched into the generated backend automatically.
 from __future__ import annotations
 
 import json
+import hashlib
+import os
 import re
 import sqlite3
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field, asdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .evidence import EvidenceBundle
@@ -34,6 +37,7 @@ class Verification:
     state: str  # verified | corrected | failed | unverifiable
     detail: str = ""
     verified_value: str = ""
+    evidence: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -186,7 +190,10 @@ def verify(
     dbs = bundle.of_kind("database")
     if dbs:
         rel = dbs[0].value
-        candidates = [Path(plan.target) / rel, Path(rel)]
+        target = Path(plan.target)
+        base = target.parent if target.is_file() else target
+        db = Path(rel)
+        candidates = [db] if db.is_absolute() else [base / db, db]
         db_path = next((p for p in candidates if p.exists()), None)
         if db_path is None:
             report.checks.append(
@@ -249,6 +256,123 @@ def verify(
             report.patches["ENDPOINTS"] = merged
 
     return report
+
+
+def _file_identity(path: str | Path) -> tuple[str, str]:
+    """Identify the executable itself, rather than its mutable window title."""
+    resolved = Path(path).resolve(strict=True)
+    if not resolved.is_file():
+        raise ValueError("GUI target must be an executable file")
+    digest = hashlib.sha256()
+    with resolved.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return os.path.normcase(str(resolved)), digest.hexdigest()
+
+
+def verify_gui(bundle: EvidenceBundle, report: VerificationReport, window, *, gui_report=None) -> VerificationReport:
+    """Verify a live, target-bound GUI using only discovery and text reads.
+
+    A saved ``gui.json`` is never an input to this check. Pattern availability
+    proves an observed control surface, not successful writes or workflows.
+    Document text is deliberately omitted from the persisted verification.
+    """
+    from . import gui
+
+    if report.target != bundle.target:
+        raise ValueError("verification target does not match the evidence bundle")
+    # Re-verification replaces previous GUI observations, retaining HTTP/DB checks.
+    report.checks[:] = [check for check in report.checks if not check.kind.startswith("gui_")]
+    try:
+        executable = gui.window_executable(window.ProcessId)
+        actual, digest = _file_identity(executable)
+        expected, expected_digest = _file_identity(bundle.target)
+        if actual != expected or digest != expected_digest:
+            raise ValueError("selected window executable does not match the evidence target")
+        observation = {
+            "source": "live-uia-read-only",
+            "executable": str(Path(executable).resolve()),
+            "sha256": digest,
+            "pid": int(window.ProcessId),
+            "window_id": int(window.NativeWindowHandle),
+            "class_name": window.ClassName or "",
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if not observation["pid"] or not observation["window_id"]:
+            raise ValueError("selected window has no live process/window identity")
+        nodes = gui.capture_tree(window)
+        if gui_report is not None:
+            gui_report.executable = observation["executable"]
+            gui_report.nodes = nodes
+        report.checks.append(Verification(
+            "gui_window", bundle.target, "verified",
+            "live UIA window belongs to the target executable; document mutations untested",
+            observation["executable"], observation,
+        ))
+        actionable = [node for node in nodes if node.patterns]
+        report.checks.append(Verification(
+            "gui_controls", bundle.target, "verified" if actionable else "unverifiable",
+            f"captured {len(nodes)} controls, {len(actionable)} with UIA patterns; actions untested",
+            evidence={**observation, "control_count": len(nodes), "pattern_control_count": len(actionable)},
+        ))
+        readable = [node for node in nodes if any(p.lower() in {"text", "value"} for p in node.patterns)]
+        # Prefer document/edit controls over incidental editable ribbon fields.
+        readable.sort(key=lambda node: {"documentcontrol": 0, "editcontrol": 1}.get(node.control_type.lower(), 2))
+        failures = []
+        for node in readable:
+            try:
+                control = gui._find_node(window, node.path)
+                if control is None:
+                    raise ValueError("control disappeared from the live tree")
+                value = gui.read_text(control)
+                if not isinstance(value, str):
+                    raise ValueError("text read did not return a string")
+                report.checks.append(Verification(
+                    "gui_read", node.path, "verified",
+                    f"live text read succeeded ({len(value)} characters); editing and saving untested",
+                    node.path, {**observation, "characters": len(value)},
+                ))
+                break
+            except Exception as exc:  # a disappearing/unsupported control must not certify reads
+                failures.append(type(exc).__name__)
+        else:
+            report.checks.append(Verification(
+                "gui_read", bundle.target, "failed" if readable else "unverifiable",
+                "no successful live text read" + (f" ({', '.join(failures[:3])})" if failures else ""),
+                evidence=observation,
+            ))
+    except Exception as exc:  # COM failures and vanished windows are failed observations, not verification
+        report.checks.append(Verification("gui_window", bundle.target, "failed", str(exc)))
+    return report
+
+
+def verified_gui_surface(verification: dict, target: str) -> bool:
+    """Accept only live observations bound to this target's current binary."""
+    try:
+        expected, digest = _file_identity(target)
+        checks = verification.get("checks", [])
+        bound = []
+        for check in checks:
+            if not isinstance(check, dict) or check.get("state") != "verified":
+                continue
+            observed = check.get("evidence", {})
+            if not isinstance(observed, dict) or observed.get("source") != "live-uia-read-only":
+                continue
+            actual, actual_digest = _file_identity(observed.get("executable", ""))
+            if actual != expected or actual_digest != digest or observed.get("sha256") != digest:
+                continue
+            if not observed.get("pid") or not observed.get("window_id") or not observed.get("observed_at"):
+                continue
+            bound.append(check)
+        windows = [check for check in bound if check.get("kind") == "gui_window" and check.get("target") == target]
+        return any(
+            read.get("kind") == "gui_read"
+            and read["evidence"]["pid"] == window["evidence"]["pid"]
+            and read["evidence"]["window_id"] == window["evidence"]["window_id"]
+            for window in windows for read in bound
+        )
+    except (OSError, ValueError, TypeError):
+        return False
 
 
 def write_report(report: VerificationReport, scaffold_dir: str | Path) -> Path:

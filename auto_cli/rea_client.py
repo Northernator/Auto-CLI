@@ -83,6 +83,8 @@ class ProbeResult:
     error: dict | None = None
     duration_s: float = 0.0
     raw: str = ""
+    returncode: int | None = None
+    stderr: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -91,6 +93,8 @@ class ProbeResult:
             "ok": self.ok,
             "duration_s": round(self.duration_s, 2),
             "error": self.error,
+            "returncode": self.returncode,
+            "stderr": self.stderr,
         }
 
 
@@ -144,6 +148,8 @@ def run_probe(
             error=doc if isinstance(doc, dict) else {"code": "unknown", "message": str(doc)[:2000]},
             duration_s=duration,
             raw=out[:4000],
+            returncode=proc.returncode,
+            stderr=(proc.stderr or "")[-4000:],
         )
     try:
         doc = json.loads(out)
@@ -155,6 +161,8 @@ def run_probe(
             error={"code": "unparseable_output", "message": out[:2000]},
             duration_s=duration,
             raw=out[:4000],
+            returncode=proc.returncode,
+            stderr=(proc.stderr or "")[-4000:],
         )
     return ProbeResult(
         command=command,
@@ -162,4 +170,6 @@ def run_probe(
         ok=True,
         envelope=doc if isinstance(doc, dict) else {"result": doc},
         duration_s=duration,
+        returncode=proc.returncode,
+        stderr=(proc.stderr or "")[-4000:],
     )
